@@ -1,0 +1,6 @@
+{
+  "name": "CS22 Garage",
+  "description": "Vitrine pública no link da bio e controle real de despesas, CMV e lucro por veículo para garagens independentes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
