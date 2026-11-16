@@ -1,6 +1,6 @@
 -- =============================================================================
--- CS22 Garage (MVP - Fase 1) — Supabase PostgreSQL Schema, RLS, Views & Storage
--- 10 Tables, UUID PKs, numeric(12,2) money, composite company_id FKs, soft-delete
+-- CS22 Garage (MVP - Fase 1/2) — Supabase PostgreSQL Schema, RLS, Views & Storage
+-- 11 Tables, UUID PKs, numeric(12,2) money, composite company_id FKs, soft-delete
 -- =============================================================================
 
 create extension if not exists "pgcrypto";
@@ -15,6 +15,7 @@ create table if not exists public.companies (
   whatsapp text not null check (char_length(trim(whatsapp)) >= 10),
   instagram text,
   address text,
+  opening_hours text default '',
   logo_url text,
   cover_url text,
   show_sold boolean not null default false,
@@ -57,8 +58,8 @@ create table if not exists public.vehicles (
   optionals text default '',
   plate text not null default '', -- NUNCA exposta na vitrine pública
   slug text not null check (slug ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
-  status text not null default 'disponivel' check (status in ('disponivel', 'reservado', 'vendido', 'inativo')),
-  previous_status text check (previous_status in ('disponivel', 'reservado', 'inativo')),
+  status text not null default 'disponivel' check (status in ('preparacao', 'disponivel', 'reservado', 'vendido', 'inativo')),
+  previous_status text check (previous_status in ('preparacao', 'disponivel', 'reservado', 'inativo')),
   purchase_price numeric(12,2) not null default 0 check (purchase_price >= 0),
   purchase_date date not null default current_date,
   purchased_from text default '',
@@ -164,7 +165,7 @@ create table if not exists public.subscriptions (
   asaas_subscription_id text,
   plan_code text not null default 'mensal_5990' check (plan_code in ('fundador_3990', 'mensal_5990', 'anual_599')),
   payment_method text check (payment_method in ('PIX', 'BOLETO', 'CREDIT_CARD')),
-  monthly_price numeric(12,2) not null default 59.90,
+  monthly_price numeric(12,2) not null default 49.90,
   status text not null default 'trialing' check (status in ('trialing', 'active', 'overdue', 'suspended', 'canceled')),
   current_period_end timestamptz,
   grace_days int not null default 5 check (grace_days >= 0),
@@ -203,6 +204,32 @@ create table if not exists public.audit_logs (
 );
 
 create index if not exists idx_audit_logs_company_created on public.audit_logs(company_id, created_at desc);
+
+-- -----------------------------------------------------------------------------
+-- 11. due_reminders (Lembretes de vencimento: IPVA, seguro, revisão, assinatura)
+-- -----------------------------------------------------------------------------
+create table if not exists public.due_reminders (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete restrict,
+  vehicle_id uuid,
+  title text not null check (char_length(trim(title)) >= 1),
+  category text not null default 'outros' check (category in (
+    'ipva', 'licenciamento', 'seguro', 'revisao', 'financiamento', 'assinatura', 'outros'
+  )),
+  due_date date not null,
+  amount numeric(12,2) check (amount is null or amount >= 0),
+  notes text default '',
+  completed_at timestamptz,
+  canceled_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint fk_due_reminders_vehicle
+    foreign key (vehicle_id, company_id) references public.vehicles(id, company_id) on delete restrict
+);
+
+create index if not exists idx_due_reminders_company_date
+  on public.due_reminders(company_id, due_date)
+  where canceled_at is null;
 
 -- =============================================================================
 -- FUNÇÕES DE SEGURANÇA MULTI-TENANT & ASSINATURA
@@ -328,12 +355,84 @@ begin
         and sale_date >= date_trunc('month', current_date)::date
         and sale_date < (date_trunc('month', current_date) + interval '1 month')::date
     ), 0)::numeric(12,2) as month_profit,
-    coalesce(sum(total_cost) filter (where status in ('disponivel', 'reservado', 'inativo')), 0)::numeric(12,2) as tied_up_capital,
+    coalesce(sum(total_cost) filter (where status in ('preparacao', 'disponivel', 'reservado', 'inativo')), 0)::numeric(12,2) as tied_up_capital,
     coalesce(round(avg(days_in_stock))::int, 0) as avg_days_in_stock
   from public.v_vehicle_financials
   where company_id = p_company_id;
 end;
 $$;
+
+-- =============================================================================
+-- ONBOARDING TRANSACIONAL COM VALIDAÇÃO DE SLUGS RESERVADOS
+-- =============================================================================
+
+create or replace function public.create_company(
+  p_name text,
+  p_slug text,
+  p_whatsapp text,
+  p_instagram text default '',
+  p_address text default '',
+  p_opening_hours text default '',
+  p_logo_url text default '',
+  p_cover_url text default ''
+)
+returns public.companies
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id uuid := auth.uid();
+  v_clean_slug text := lower(trim(p_slug));
+  v_clean_whatsapp text := regexp_replace(coalesce(p_whatsapp, ''), '\D', '', 'g');
+  v_company public.companies;
+begin
+  if v_user_id is null then
+    raise exception 'Usuário não autenticado';
+  end if;
+
+  if exists (select 1 from public.company_members where user_id = v_user_id) then
+    raise exception 'Usuário já possui uma garagem vinculada';
+  end if;
+
+  if v_clean_slug = any(array['admin', 'api', 'g', 'app', 'login', 'entrar', 'planos', 'cadastro', 'onboarding']) then
+    raise exception 'Endereço reservado pelo sistema';
+  end if;
+
+  if v_clean_slug !~ '^[a-z0-9]+(?:-[a-z0-9]+)*$' then
+    raise exception 'Slug inválido para a vitrine';
+  end if;
+
+  if char_length(v_clean_whatsapp) < 10 then
+    raise exception 'WhatsApp inválido';
+  end if;
+
+  insert into public.companies (
+    name, slug, whatsapp, instagram, address, opening_hours, logo_url, cover_url
+  )
+  values (
+    trim(p_name),
+    v_clean_slug,
+    v_clean_whatsapp,
+    nullif(trim(coalesce(p_instagram, '')), ''),
+    nullif(trim(coalesce(p_address, '')), ''),
+    coalesce(trim(p_opening_hours), ''),
+    nullif(trim(coalesce(p_logo_url, '')), ''),
+    nullif(trim(coalesce(p_cover_url, '')), '')
+  )
+  returning * into v_company;
+
+  insert into public.company_members (company_id, user_id, role)
+  values (v_company.id, v_user_id, 'owner');
+
+  insert into public.subscriptions (company_id, plan_code, monthly_price, status, grace_days)
+  values (v_company.id, 'mensal_5990', 49.90, 'trialing', 5);
+
+  return v_company;
+end;
+$$;
+
+grant execute on function public.create_company(text, text, text, text, text, text, text, text) to authenticated;
 
 -- =============================================================================
 -- VIEWS PÚBLICAS SEGURAS PARA A VITRINE (SEM PLACA, COMPRA, DESPESAS OU VENDA)
@@ -347,6 +446,7 @@ select
   c.whatsapp,
   c.instagram,
   c.address,
+  coalesce(c.opening_hours, '') as opening_hours,
   c.logo_url,
   c.cover_url,
   c.show_sold
@@ -394,7 +494,7 @@ where v.deleted_at is null
 revoke all on public.companies, public.company_members, public.vehicles,
   public.vehicle_photos, public.vehicle_expenses, public.vehicle_sales,
   public.vehicle_daily_stats, public.subscriptions, public.asaas_events,
-  public.audit_logs from anon;
+  public.audit_logs, public.due_reminders from anon;
 
 grant select on public.public_companies_view, public.public_vehicles_view to anon, authenticated;
 
@@ -448,6 +548,175 @@ $$;
 
 grant execute on function public.track_public_vehicle_event(text, text, text) to anon, authenticated;
 
+create or replace function public.track_vehicle_view(p_vehicle_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_company_id uuid;
+begin
+  select pv.company_id into v_company_id
+  from public.public_vehicles_view pv
+  where pv.id = p_vehicle_id
+    and pv.status = 'disponivel'
+  limit 1;
+
+  if v_company_id is null then
+    return;
+  end if;
+
+  insert into public.vehicle_daily_stats (company_id, vehicle_id, stat_date, views, whatsapp_clicks)
+  values (v_company_id, p_vehicle_id, current_date, 1, 0)
+  on conflict (vehicle_id, stat_date) do update
+  set views = public.vehicle_daily_stats.views + 1;
+end;
+$$;
+
+create or replace function public.track_whatsapp_click(p_vehicle_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_company_id uuid;
+begin
+  select pv.company_id into v_company_id
+  from public.public_vehicles_view pv
+  where pv.id = p_vehicle_id
+    and pv.status = 'disponivel'
+  limit 1;
+
+  if v_company_id is null then
+    return;
+  end if;
+
+  insert into public.vehicle_daily_stats (company_id, vehicle_id, stat_date, views, whatsapp_clicks)
+  values (v_company_id, p_vehicle_id, current_date, 0, 1)
+  on conflict (vehicle_id, stat_date) do update
+  set whatsapp_clicks = public.vehicle_daily_stats.whatsapp_clicks + 1;
+end;
+$$;
+
+grant execute on function public.track_vehicle_view(uuid) to anon, authenticated;
+grant execute on function public.track_whatsapp_click(uuid) to anon, authenticated;
+
+-- =============================================================================
+-- TRIGGERS: updated_at, STATUS DE VENDA E AUDIT_LOGS
+-- =============================================================================
+
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_companies_updated_at on public.companies;
+create trigger trg_companies_updated_at
+  before update on public.companies
+  for each row execute function public.set_updated_at();
+
+drop trigger if exists trg_vehicles_updated_at on public.vehicles;
+create trigger trg_vehicles_updated_at
+  before update on public.vehicles
+  for each row execute function public.set_updated_at();
+
+drop trigger if exists trg_subscriptions_updated_at on public.subscriptions;
+create trigger trg_subscriptions_updated_at
+  before update on public.subscriptions
+  for each row execute function public.set_updated_at();
+
+create or replace function public.sync_vehicle_status_from_sale()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_op = 'INSERT' and new.canceled_at is null then
+    update public.vehicles
+    set
+      previous_status = case when status in ('preparacao', 'disponivel', 'reservado', 'inativo') then status else 'disponivel' end,
+      status = 'vendido',
+      updated_at = now()
+    where id = new.vehicle_id and company_id = new.company_id;
+  elsif tg_op = 'UPDATE' and old.canceled_at is null and new.canceled_at is not null then
+    update public.vehicles
+    set
+      status = coalesce(previous_status, 'disponivel'),
+      previous_status = null,
+      updated_at = now()
+    where id = new.vehicle_id and company_id = new.company_id;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_vehicle_sales_sync_status on public.vehicle_sales;
+create trigger trg_vehicle_sales_sync_status
+  after insert or update of canceled_at on public.vehicle_sales
+  for each row execute function public.sync_vehicle_status_from_sale();
+
+create or replace function public.write_audit_log_trigger()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.audit_logs (
+    company_id,
+    user_id,
+    action,
+    table_name,
+    record_id,
+    before_data,
+    after_data
+  )
+  values (
+    coalesce(new.company_id, old.company_id),
+    auth.uid(),
+    lower(tg_op),
+    tg_table_name,
+    coalesce(new.id, old.id),
+    case when tg_op in ('UPDATE', 'DELETE') then to_jsonb(old) else null end,
+    case when tg_op in ('INSERT', 'UPDATE') then to_jsonb(new) else null end
+  );
+  return coalesce(new, old);
+end;
+$$;
+
+drop trigger if exists trg_audit_vehicle_sales on public.vehicle_sales;
+create trigger trg_audit_vehicle_sales
+  after insert or update on public.vehicle_sales
+  for each row execute function public.write_audit_log_trigger();
+
+drop trigger if exists trg_audit_vehicle_expenses on public.vehicle_expenses;
+create trigger trg_audit_vehicle_expenses
+  after insert or update on public.vehicle_expenses
+  for each row execute function public.write_audit_log_trigger();
+
+drop trigger if exists trg_audit_subscriptions on public.subscriptions;
+create trigger trg_audit_subscriptions
+  after insert or update on public.subscriptions
+  for each row execute function public.write_audit_log_trigger();
+
+drop trigger if exists trg_due_reminders_updated_at on public.due_reminders;
+create trigger trg_due_reminders_updated_at
+  before update on public.due_reminders
+  for each row execute function public.set_updated_at();
+
+drop trigger if exists trg_audit_due_reminders on public.due_reminders;
+create trigger trg_audit_due_reminders
+  after insert or update on public.due_reminders
+  for each row execute function public.write_audit_log_trigger();
+
 -- =============================================================================
 -- ROW LEVEL SECURITY (RLS) EM TODAS AS TABELAS MULTI-TENANT
 -- =============================================================================
@@ -462,72 +731,133 @@ alter table public.vehicle_daily_stats enable row level security;
 alter table public.subscriptions enable row level security;
 alter table public.asaas_events enable row level security;
 alter table public.audit_logs enable row level security;
+alter table public.due_reminders enable row level security;
 
 -- companies
+drop policy if exists "companies_select_member" on public.companies;
 create policy "companies_select_member" on public.companies
   for select to authenticated using (public.is_company_member(id));
+drop policy if exists "companies_update_member" on public.companies;
 create policy "companies_update_member" on public.companies
-  for update to authenticated using (public.is_company_member(id)) with check (public.is_company_member(id));
+  for update to authenticated
+  using (public.is_company_member(id))
+  with check (public.is_company_member(id));
 
 -- company_members
+drop policy if exists "company_members_select_own" on public.company_members;
 create policy "company_members_select_own" on public.company_members
   for select to authenticated using (user_id = auth.uid() or public.is_company_member(company_id));
 
--- vehicles
-create policy "vehicles_all_member" on public.vehicles
-  for all to authenticated
-  using (public.is_company_member(company_id))
-  with check (public.is_company_member(company_id));
+-- vehicles (leitura sempre permitida ao membro; escrita exige assinatura/trial ativo; sem DELETE)
+drop policy if exists "vehicles_select_member" on public.vehicles;
+create policy "vehicles_select_member" on public.vehicles
+  for select to authenticated using (public.is_company_member(company_id));
+drop policy if exists "vehicles_insert_member" on public.vehicles;
+create policy "vehicles_insert_member" on public.vehicles
+  for insert to authenticated
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
+drop policy if exists "vehicles_update_member" on public.vehicles;
+create policy "vehicles_update_member" on public.vehicles
+  for update to authenticated
+  using (public.is_company_member(company_id) and public.company_has_active_access(company_id))
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
 
 -- vehicle_photos
-create policy "vehicle_photos_all_member" on public.vehicle_photos
-  for all to authenticated
-  using (public.is_company_member(company_id))
-  with check (public.is_company_member(company_id));
+drop policy if exists "vehicle_photos_select_member" on public.vehicle_photos;
+create policy "vehicle_photos_select_member" on public.vehicle_photos
+  for select to authenticated using (public.is_company_member(company_id));
+drop policy if exists "vehicle_photos_insert_member" on public.vehicle_photos;
+create policy "vehicle_photos_insert_member" on public.vehicle_photos
+  for insert to authenticated
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
+drop policy if exists "vehicle_photos_update_member" on public.vehicle_photos;
+create policy "vehicle_photos_update_member" on public.vehicle_photos
+  for update to authenticated
+  using (public.is_company_member(company_id) and public.company_has_active_access(company_id))
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
 
 -- vehicle_expenses
-create policy "vehicle_expenses_all_member" on public.vehicle_expenses
-  for all to authenticated
-  using (public.is_company_member(company_id))
-  with check (public.is_company_member(company_id));
+drop policy if exists "vehicle_expenses_select_member" on public.vehicle_expenses;
+create policy "vehicle_expenses_select_member" on public.vehicle_expenses
+  for select to authenticated using (public.is_company_member(company_id));
+drop policy if exists "vehicle_expenses_insert_member" on public.vehicle_expenses;
+create policy "vehicle_expenses_insert_member" on public.vehicle_expenses
+  for insert to authenticated
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
+drop policy if exists "vehicle_expenses_update_member" on public.vehicle_expenses;
+create policy "vehicle_expenses_update_member" on public.vehicle_expenses
+  for update to authenticated
+  using (public.is_company_member(company_id) and public.company_has_active_access(company_id))
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
 
 -- vehicle_sales
-create policy "vehicle_sales_all_member" on public.vehicle_sales
-  for all to authenticated
-  using (public.is_company_member(company_id))
-  with check (public.is_company_member(company_id));
+drop policy if exists "vehicle_sales_select_member" on public.vehicle_sales;
+create policy "vehicle_sales_select_member" on public.vehicle_sales
+  for select to authenticated using (public.is_company_member(company_id));
+drop policy if exists "vehicle_sales_insert_member" on public.vehicle_sales;
+create policy "vehicle_sales_insert_member" on public.vehicle_sales
+  for insert to authenticated
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
+drop policy if exists "vehicle_sales_update_member" on public.vehicle_sales;
+create policy "vehicle_sales_update_member" on public.vehicle_sales
+  for update to authenticated
+  using (public.is_company_member(company_id) and public.company_has_active_access(company_id))
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
 
 -- vehicle_daily_stats
+drop policy if exists "vehicle_daily_stats_select_member" on public.vehicle_daily_stats;
 create policy "vehicle_daily_stats_select_member" on public.vehicle_daily_stats
   for select to authenticated using (public.is_company_member(company_id));
 
--- subscriptions
+-- subscriptions (somente leitura para membros; escrita exclusiva service_role)
+drop policy if exists "subscriptions_select_member" on public.subscriptions;
 create policy "subscriptions_select_member" on public.subscriptions
   for select to authenticated using (public.is_company_member(company_id));
 
 -- audit_logs (somente leitura para membros; escrita via trigger/service_role)
+drop policy if exists "audit_logs_select_member" on public.audit_logs;
 create policy "audit_logs_select_member" on public.audit_logs
   for select to authenticated using (public.is_company_member(company_id));
+
+-- due_reminders
+drop policy if exists "due_reminders_select_member" on public.due_reminders;
+create policy "due_reminders_select_member" on public.due_reminders
+  for select to authenticated using (public.is_company_member(company_id));
+drop policy if exists "due_reminders_insert_member" on public.due_reminders;
+create policy "due_reminders_insert_member" on public.due_reminders
+  for insert to authenticated
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
+drop policy if exists "due_reminders_update_member" on public.due_reminders;
+create policy "due_reminders_update_member" on public.due_reminders
+  for update to authenticated
+  using (public.is_company_member(company_id) and public.company_has_active_access(company_id))
+  with check (public.is_company_member(company_id) and public.company_has_active_access(company_id));
 
 -- asaas_events: nenhuma policy pública (acesso exclusivo via service_role nas Edge Functions)
 
 -- =============================================================================
--- STORAGE BUCKET & POLÍTICAS POR company_id
+-- STORAGE BUCKETS & POLÍTICAS POR company_id
 -- =============================================================================
 insert into storage.buckets (id, name, public)
 values ('vehicle-photos', 'vehicle-photos', true)
 on conflict (id) do nothing;
 
+insert into storage.buckets (id, name, public)
+values ('company-assets', 'company-assets', true)
+on conflict (id) do nothing;
+
+drop policy if exists "vehicle_photos_storage_insert" on storage.objects;
 create policy "vehicle_photos_storage_insert" on storage.objects
   for insert to authenticated
   with check (
-    bucket_id = 'vehicle-photos'
+    bucket_id in ('vehicle-photos', 'company-assets')
     and public.is_company_member((storage.foldername(name))[1]::uuid)
   );
 
+drop policy if exists "vehicle_photos_storage_delete" on storage.objects;
 create policy "vehicle_photos_storage_delete" on storage.objects
   for delete to authenticated
   using (
-    bucket_id = 'vehicle-photos'
+    bucket_id in ('vehicle-photos', 'company-assets')
     and public.is_company_member((storage.foldername(name))[1]::uuid)
   );

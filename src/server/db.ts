@@ -60,6 +60,7 @@ export function initSchemaAndSeed() {
       whatsapp TEXT NOT NULL,
       instagram TEXT NOT NULL DEFAULT '',
       address TEXT NOT NULL DEFAULT '',
+      opening_hours TEXT NOT NULL DEFAULT '',
       logo_url TEXT NOT NULL DEFAULT '',
       cover_url TEXT NOT NULL DEFAULT '',
       show_sold INTEGER NOT NULL DEFAULT 0,
@@ -94,8 +95,8 @@ export function initSchemaAndSeed() {
       optionals TEXT NOT NULL DEFAULT '',
       plate TEXT NOT NULL DEFAULT '',
       slug TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'disponivel' CHECK (status IN ('disponivel', 'reservado', 'vendido', 'inativo')),
-      previous_status TEXT CHECK (previous_status IN ('disponivel', 'reservado', 'inativo')),
+      status TEXT NOT NULL DEFAULT 'disponivel' CHECK (status IN ('preparacao', 'disponivel', 'reservado', 'vendido', 'inativo')),
+      previous_status TEXT CHECK (previous_status IN ('preparacao', 'disponivel', 'reservado', 'inativo')),
       purchase_price REAL NOT NULL DEFAULT 0 CHECK (purchase_price >= 0),
       purchase_date TEXT NOT NULL,
       purchased_from TEXT NOT NULL DEFAULT '',
@@ -174,7 +175,7 @@ export function initSchemaAndSeed() {
       asaas_subscription_id TEXT,
       plan_code TEXT NOT NULL DEFAULT 'mensal_5990' CHECK (plan_code IN ('fundador_3990', 'mensal_5990', 'anual_599')),
       payment_method TEXT CHECK (payment_method IN ('PIX', 'BOLETO', 'CREDIT_CARD')),
-      monthly_price REAL NOT NULL DEFAULT 59.90,
+      monthly_price REAL NOT NULL DEFAULT 49.90,
       status TEXT NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'overdue', 'suspended', 'canceled')),
       current_period_end TEXT,
       grace_days INTEGER NOT NULL DEFAULT 5,
@@ -206,6 +207,80 @@ export function initSchemaAndSeed() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS due_reminders (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+      vehicle_id TEXT,
+      title TEXT NOT NULL,
+      category TEXT NOT NULL CHECK (category IN (
+        'ipva', 'licenciamento', 'seguro', 'revisao', 'financiamento', 'assinatura', 'outros'
+      )),
+      due_date TEXT NOT NULL,
+      amount REAL CHECK (amount IS NULL OR amount >= 0),
+      notes TEXT NOT NULL DEFAULT '',
+      completed_at TEXT,
+      canceled_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (vehicle_id, company_id) REFERENCES vehicles(id, company_id) ON DELETE RESTRICT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_due_reminders_company_date ON due_reminders(company_id, due_date);
+  `);
+
+  // Safe migrations for existing SQLite databases before recreating views
+  const companyCols = db.prepare('PRAGMA table_info(companies)').all() as Array<{ name: string }>;
+  if (!companyCols.some((c) => c.name === 'opening_hours')) {
+    db.exec("ALTER TABLE companies ADD COLUMN opening_hours TEXT NOT NULL DEFAULT ''");
+  }
+
+  const vehiclesTableInfo = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='vehicles'")
+    .get() as { sql?: string } | undefined;
+  if (vehiclesTableInfo?.sql && !vehiclesTableInfo.sql.includes("'preparacao'")) {
+    db.exec('DROP VIEW IF EXISTS v_vehicle_financials; DROP VIEW IF EXISTS public_vehicles_view;');
+    db.exec('PRAGMA foreign_keys = OFF;');
+    db.exec(`
+      BEGIN;
+      CREATE TABLE vehicles_new (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+        brand TEXT NOT NULL,
+        model TEXT NOT NULL,
+        version TEXT NOT NULL DEFAULT '',
+        manufacture_year INTEGER NOT NULL CHECK (manufacture_year BETWEEN 1940 AND 2100),
+        model_year INTEGER NOT NULL CHECK (model_year BETWEEN 1940 AND 2100),
+        mileage INTEGER NOT NULL DEFAULT 0 CHECK (mileage >= 0),
+        fuel TEXT NOT NULL DEFAULT 'Flex',
+        transmission TEXT NOT NULL DEFAULT 'Automático',
+        color TEXT NOT NULL DEFAULT '',
+        announced_price REAL NOT NULL CHECK (announced_price >= 0),
+        description TEXT NOT NULL DEFAULT '',
+        optionals TEXT NOT NULL DEFAULT '',
+        plate TEXT NOT NULL DEFAULT '',
+        slug TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'disponivel' CHECK (status IN ('preparacao', 'disponivel', 'reservado', 'vendido', 'inativo')),
+        previous_status TEXT CHECK (previous_status IN ('preparacao', 'disponivel', 'reservado', 'inativo')),
+        purchase_price REAL NOT NULL DEFAULT 0 CHECK (purchase_price >= 0),
+        purchase_date TEXT NOT NULL,
+        purchased_from TEXT NOT NULL DEFAULT '',
+        deleted_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (id, company_id),
+        UNIQUE (company_id, slug)
+      );
+      INSERT INTO vehicles_new SELECT * FROM vehicles;
+      DROP TABLE vehicles;
+      ALTER TABLE vehicles_new RENAME TO vehicles;
+      CREATE INDEX IF NOT EXISTS idx_vehicles_company_status ON vehicles(company_id, status);
+      CREATE INDEX IF NOT EXISTS idx_vehicles_company_created ON vehicles(company_id, created_at);
+      COMMIT;
+    `);
+    db.exec('PRAGMA foreign_keys = ON;');
+  }
+
+  db.exec(`
     DROP VIEW IF EXISTS v_vehicle_financials;
     CREATE VIEW v_vehicle_financials AS
     SELECT
@@ -289,10 +364,6 @@ export function initSchemaAndSeed() {
       AND (v.status = 'disponivel' OR (v.status = 'vendido' AND c.show_sold = 1));
   `);
 
-  // Seed data only when database is empty
-  const existingUser = db.prepare('SELECT id FROM users LIMIT 1').get();
-  if (existingUser) return;
-
   const now = new Date();
   const isoDay = (offsetDays: number) => {
     const d = new Date(now.getTime() + offsetDays * 86400_000);
@@ -302,6 +373,51 @@ export function initSchemaAndSeed() {
     const d = new Date(now.getTime() + offsetDays * 86400_000);
     return d.toISOString();
   };
+
+  // Seed data only when database is empty
+  const existingUser = db.prepare('SELECT id FROM users LIMIT 1').get();
+  if (existingUser) {
+    const existingReminder = db.prepare('SELECT id FROM due_reminders LIMIT 1').get();
+    if (!existingReminder) {
+      const comp1 = db.prepare("SELECT id FROM companies WHERE slug = 'premium-motors'").get() as { id: string } | undefined;
+      const comp2 = db.prepare("SELECT id FROM companies WHERE slug = 'horizonte-auto'").get() as { id: string } | undefined;
+      if (comp1) {
+        const v1 = db.prepare('SELECT id FROM vehicles WHERE company_id = ? LIMIT 1').get(comp1.id) as { id: string } | undefined;
+        const v2 = db.prepare('SELECT id FROM vehicles WHERE company_id = ? LIMIT 1 OFFSET 1').get(comp1.id) as { id: string } | undefined;
+        const insertReminder = db.prepare(`
+          INSERT INTO due_reminders (id, company_id, vehicle_id, title, category, due_date, amount, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        insertReminder.run(
+          crypto.randomUUID(), comp1.id, v1?.id ?? null,
+          'Licenciamento anual Honda Accord', 'licenciamento', isoDay(2), 167.74,
+          'Renovar CRLV digital antes de liberar entrega.'
+        );
+        insertReminder.run(
+          crypto.randomUUID(), comp1.id, v2?.id ?? null,
+          'IPVA cota única Audi Q3', 'ipva', isoDay(-1), 2890.00,
+          'Confirmar quitação no despachante.'
+        );
+        insertReminder.run(
+          crypto.randomUUID(), comp1.id, null,
+          'Seguro pátio e test-drive da loja', 'seguro', isoDay(6), 680.00,
+          'Boleto mensal da seguradora.'
+        );
+      }
+      if (comp2) {
+        const v5 = db.prepare('SELECT id FROM vehicles WHERE company_id = ? LIMIT 1').get(comp2.id) as { id: string } | undefined;
+        db.prepare(`
+          INSERT INTO due_reminders (id, company_id, vehicle_id, title, category, due_date, amount, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          crypto.randomUUID(), comp2.id, v5?.id ?? null,
+          'Laudo cautelar Toyota Corolla (Garagem 2)', 'revisao', isoDay(4), 320.00,
+          'Registro exclusivo da Horizonte Auto para validação de isolamento.'
+        );
+      }
+    }
+    return;
+  }
 
   const user1Id = crypto.randomUUID();
   const user2Id = crypto.randomUUID();
@@ -353,8 +469,8 @@ export function initSchemaAndSeed() {
 
   db.prepare(`
     INSERT INTO subscriptions (id, company_id, plan_code, monthly_price, status, grace_days)
-    VALUES (?, ?, 'fundador_3990', 39.90, 'trialing', 5),
-           (?, ?, 'mensal_5990', 59.90, 'trialing', 5)
+    VALUES (?, ?, 'mensal_5990', 49.90, 'trialing', 5),
+           (?, ?, 'mensal_5990', 49.90, 'trialing', 5)
   `).run(crypto.randomUUID(), comp1Id, crypto.randomUUID(), comp2Id);
 
   // Seed 4 vehicles for Garage 1 (Premium Motors)
@@ -465,4 +581,33 @@ export function initSchemaAndSeed() {
     139000, isoDay(-15), 'Particular'
   );
   insertPhoto.run(crypto.randomUUID(), comp2Id, v5Id, '/src/assets/images/car_corolla_altis_1794570998697.jpg', 0);
+
+  // Seed initial due reminders if none exist
+  const existingReminder = db.prepare('SELECT id FROM due_reminders LIMIT 1').get();
+  if (!existingReminder) {
+    const insertReminder = db.prepare(`
+      INSERT INTO due_reminders (id, company_id, vehicle_id, title, category, due_date, amount, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertReminder.run(
+      crypto.randomUUID(), comp1Id, v1Id,
+      'Licenciamento anual Honda Accord', 'licenciamento', isoDay(2), 167.74,
+      'Renovar CRLV digital antes de liberar entrega.'
+    );
+    insertReminder.run(
+      crypto.randomUUID(), comp1Id, v2Id,
+      'IPVA cota única Audi Q3', 'ipva', isoDay(-1), 2890.00,
+      'Confirmar quitação no despachante.'
+    );
+    insertReminder.run(
+      crypto.randomUUID(), comp1Id, null,
+      'Seguro pátio e test-drive da loja', 'seguro', isoDay(6), 680.00,
+      'Boleto mensal da seguradora.'
+    );
+    insertReminder.run(
+      crypto.randomUUID(), comp2Id, v5Id,
+      'Laudo cautelar Toyota Corolla (Garagem 2)', 'revisao', isoDay(4), 320.00,
+      'Registro exclusivo da Horizonte Auto para validação de isolamento.'
+    );
+  }
 }

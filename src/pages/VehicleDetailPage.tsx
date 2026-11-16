@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { compressVehicleImage } from '../lib/imageCompression';
+import { subtractMoney, calculateMarginRatio } from '../lib/money';
 import {
   EXPENSE_CATEGORY_LABELS,
   VEHICLE_STATUS_LABELS,
@@ -79,6 +80,8 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
   const [paymentMethod, setPaymentMethod] = useState('');
   const [saleNotes, setSaleNotes] = useState('');
   const [submittingSale, setSubmittingSale] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [confirmCancelSale, setConfirmCancelSale] = useState(false);
 
   const loadVehicle = useCallback(async () => {
     if (!vehicleId) return;
@@ -106,15 +109,13 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
       setPurchaseDate(v.purchase_date);
       setPurchasedFrom(v.purchased_from);
       setPhotos(res.photos.map((p) => p.storage_path));
-      if (!salePrice) {
-        setSalePrice(String(v.announced_price));
-      }
+      setSalePrice((prev) => prev || String(v.announced_price));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erro ao carregar veículo.');
     } finally {
       setLoading(false);
     }
-  }, [vehicleId, salePrice]);
+  }, [vehicleId]);
 
   useEffect(() => {
     if (!isNew) {
@@ -292,6 +293,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
       await apiRequest(`/api/vehicles/${vehicleId}/sales/${saleId}/cancel`, {
         method: 'POST',
       });
+      setConfirmCancelSale(false);
       await loadVehicle();
       setSuccess('Venda cancelada e status do veículo restaurado.');
     } catch (err) {
@@ -314,12 +316,27 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
     return <div className="h-64 bg-white border border-slate-200 rounded-2xl animate-pulse" />;
   }
 
+  if (!isNew && !detail?.vehicle) {
+    return (
+      <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-4">
+        <p className="font-display text-base font-bold text-slate-900">Veículo não encontrado</p>
+        <p className="text-sm text-slate-500">{error || 'Este veículo não existe ou foi arquivado.'}</p>
+        <button
+          type="button"
+          onClick={() => navigate('/app/veiculos')}
+          className="min-h-[42px] px-4 py-2 bg-brand-blue hover:bg-brand-blue-hover text-white text-sm font-semibold rounded-xl"
+        >
+          Voltar para veículos
+        </button>
+      </div>
+    );
+  }
+
   const v = detail?.vehicle;
   const activeSale = detail?.sales.find((s) => !s.canceled_at);
-  const previewSaleNum = Number(salePrice || 0);
   const currentCMV = v?.total_cost ?? Number(purchasePrice || 0);
-  const previewProfit = previewSaleNum - currentCMV;
-  const previewMargin = previewSaleNum > 0 ? previewProfit / previewSaleNum : 0;
+  const previewProfit = subtractMoney(salePrice || 0, currentCMV);
+  const previewMargin = calculateMarginRatio(salePrice || 0, currentCMV);
 
   return (
     <div className="space-y-5">
@@ -447,7 +464,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={brand}
                 onChange={(e) => setBrand(e.target.value)}
                 placeholder="Ex: Toyota"
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -458,7 +475,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="Ex: Corolla"
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -468,7 +485,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={version}
                 onChange={(e) => setVersion(e.target.value)}
                 placeholder="Ex: Altis Hybrid 1.8"
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
           </div>
@@ -481,7 +498,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 required
                 value={manufactureYear}
                 onChange={(e) => setManufactureYear(Number(e.target.value))}
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -491,7 +508,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 required
                 value={modelYear}
                 onChange={(e) => setModelYear(Number(e.target.value))}
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -502,7 +519,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 required
                 value={mileage}
                 onChange={(e) => setMileage(Number(e.target.value))}
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -512,7 +529,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={color}
                 onChange={(e) => setColor(e.target.value)}
                 placeholder="Ex: Prata"
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
           </div>
@@ -523,7 +540,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
               <select
                 value={fuel}
                 onChange={(e) => setFuel(e.target.value)}
-                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               >
                 <option value="Flex">Flex</option>
                 <option value="Gasolina">Gasolina</option>
@@ -537,7 +554,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
               <select
                 value={transmission}
                 onChange={(e) => setTransmission(e.target.value)}
-                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               >
                 <option value="Automático">Automático</option>
                 <option value="Manual">Manual</option>
@@ -555,7 +572,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={announcedPrice}
                 onChange={(e) => setAnnouncedPrice(e.target.value)}
                 placeholder="89900"
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -564,8 +581,9 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={status}
                 disabled={v?.status === 'vendido'}
                 onChange={(e) => setStatus(e.target.value as VehicleStatus)}
-                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm disabled:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm disabled:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-blue"
               >
+                <option value="preparacao">Em preparação (fora da vitrine)</option>
                 <option value="disponivel">Disponível (na vitrine)</option>
                 <option value="reservado">Reservado</option>
                 <option value="inativo">Inativo</option>
@@ -582,7 +600,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Histórico de revisões, estado dos pneus, laudo cautelar..."
-                className="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div>
@@ -592,7 +610,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={optionals}
                 onChange={(e) => setOptionals(e.target.value)}
                 placeholder="Ar digital, multimídia, bancos em couro, câmera de ré..."
-                className="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
           </div>
@@ -611,7 +629,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   value={plate}
                   onChange={(e) => setPlate(e.target.value.toUpperCase())}
                   placeholder="ABC1D23"
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
               <div>
@@ -624,7 +642,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   value={purchasePrice}
                   onChange={(e) => setPurchasePrice(e.target.value)}
                   placeholder="76000"
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
               <div>
@@ -634,7 +652,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   required
                   value={purchaseDate}
                   onChange={(e) => setPurchaseDate(e.target.value)}
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
               <div>
@@ -644,7 +662,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   value={purchasedFrom}
                   onChange={(e) => setPurchasedFrom(e.target.value)}
                   placeholder="Particular / Repasse / Leilão"
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
             </div>
@@ -652,14 +670,33 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
 
           <div className="pt-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
             {!isNew ? (
-              <button
-                type="button"
-                onClick={handleDeleteVehicle}
-                className="min-h-[44px] px-4 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
-              >
-                <Trash2 className="w-4 h-4" />
-                <span>Arquivar veículo</span>
-              </button>
+              confirmArchive ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDeleteVehicle}
+                    className="min-h-[44px] px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-xs font-semibold rounded-xl transition-colors"
+                  >
+                    Confirmar arquivamento
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmArchive(false)}
+                    className="min-h-[44px] px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmArchive(true)}
+                  className="min-h-[44px] px-4 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Arquivar veículo</span>
+                </button>
+              )
             ) : (
               <div />
             )}
@@ -667,7 +704,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
             <button
               type="submit"
               disabled={saving}
-              className="min-h-[46px] px-6 py-2.5 bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors"
+              className="min-h-[46px] px-6 py-2.5 bg-brand-blue hover:bg-brand-blue-hover disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors"
             >
               {saving ? 'Salvando...' : isNew ? 'Cadastrar veículo' : 'Salvar alterações'}
             </button>
@@ -686,7 +723,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
               </p>
             </div>
             {photos.length < 10 && (
-              <label className="min-h-[44px] px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs sm:text-sm font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-2 transition-colors">
+              <label className="min-h-[44px] px-4 py-2 bg-brand-blue hover:bg-brand-blue-hover text-white text-xs sm:text-sm font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-2 transition-colors">
                 <Camera className="w-4 h-4" />
                 <span>{uploadingPhoto ? 'Comprimindo...' : 'Adicionar fotos'}</span>
                 <input
@@ -768,7 +805,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 value={expDesc}
                 onChange={(e) => setExpDesc(e.target.value)}
                 placeholder="Ex: Troca de óleo e filtros"
-                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -777,7 +814,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                 <select
                   value={expCat}
                   onChange={(e) => setExpCat(e.target.value as ExpenseCategory)}
-                  className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 >
                   {Object.entries(EXPENSE_CATEGORY_LABELS).map(([k, label]) => (
                     <option key={k} value={k}>
@@ -796,7 +833,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   value={expAmount}
                   onChange={(e) => setExpAmount(e.target.value)}
                   placeholder="450,00"
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
             </div>
@@ -808,7 +845,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   required
                   value={expDate}
                   onChange={(e) => setExpDate(e.target.value)}
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
               <div>
@@ -818,14 +855,14 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   value={expSupplier}
                   onChange={(e) => setExpSupplier(e.target.value)}
                   placeholder="Oficina / Despachante"
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
             </div>
             <button
               type="submit"
               disabled={addingExpense}
-              className="w-full min-h-[44px] py-2.5 bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-sm font-semibold rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+              className="w-full min-h-[44px] py-2.5 bg-brand-blue hover:bg-brand-blue-hover disabled:opacity-60 text-white text-sm font-semibold rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
             >
               <Plus className="w-4 h-4" />
               <span>{addingExpense ? 'Lançando...' : 'Adicionar despesa'}</span>
@@ -903,13 +940,32 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                     </p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => handleCancelSale(activeSale.id)}
-                  className="min-h-[40px] px-4 py-2 border border-red-200 text-red-700 hover:bg-red-50 text-xs font-semibold rounded-xl transition-colors"
-                >
-                  Cancelar venda (devolver ao estoque)
-                </button>
+                {confirmCancelSale ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleCancelSale(activeSale.id)}
+                      className="min-h-[40px] px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-xs font-semibold rounded-xl transition-colors"
+                    >
+                      Confirmar devolução ao estoque
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmCancelSale(false)}
+                      className="min-h-[40px] px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl transition-colors"
+                    >
+                      Manter venda
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmCancelSale(true)}
+                    className="min-h-[40px] px-4 py-2 border border-red-200 text-red-700 hover:bg-red-50 text-xs font-semibold rounded-xl transition-colors"
+                  >
+                    Cancelar venda (devolver ao estoque)
+                  </button>
+                )}
               </div>
 
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -981,7 +1037,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                     required
                     value={saleDate}
                     onChange={(e) => setSaleDate(e.target.value)}
-                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-700"
+                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-blue"
                   />
                 </div>
                 <div>
@@ -993,7 +1049,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                     step="0.01"
                     value={salePrice}
                     onChange={(e) => setSalePrice(e.target.value)}
-                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-700"
+                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-blue"
                   />
                 </div>
               </div>
@@ -1007,7 +1063,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                     value={buyerName}
                     onChange={(e) => setBuyerName(e.target.value)}
                     placeholder="Nome completo"
-                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
                   />
                 </div>
                 <div>
@@ -1017,7 +1073,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                     value={buyerPhone}
                     onChange={(e) => setBuyerPhone(e.target.value)}
                     placeholder="11999990000"
-                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-700"
+                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-blue"
                   />
                 </div>
               </div>
@@ -1029,7 +1085,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   value={paymentMethod}
                   onChange={(e) => setPaymentMethod(e.target.value)}
                   placeholder="Ex: Pix + Financiamento BV / Troca + TED"
-                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
 
@@ -1039,7 +1095,7 @@ export function VehicleDetailPage({ vehicleId, navigate }: VehicleDetailPageProp
                   rows={2}
                   value={saleNotes}
                   onChange={(e) => setSaleNotes(e.target.value)}
-                  className="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+                  className="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
                 />
               </div>
 

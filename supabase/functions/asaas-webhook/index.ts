@@ -63,13 +63,14 @@ serve(async (req) => {
     if (eventType === "PAYMENT_CONFIRMED" || eventType === "PAYMENT_RECEIVED") {
       updates.status = "active";
       updates.overdue_since = null;
+      updates.canceled_at = null;
       const nextPeriod = new Date();
       nextPeriod.setDate(nextPeriod.getDate() + 30);
       updates.current_period_end = nextPeriod.toISOString();
     } else if (eventType === "PAYMENT_OVERDUE") {
       updates.status = "overdue";
       updates.overdue_since = sub.overdue_since || new Date().toISOString();
-    } else if (eventType === "PAYMENT_REFUNDED") {
+    } else if (eventType === "PAYMENT_REFUNDED" || eventType === "GRACE_PERIOD_EXPIRED") {
       updates.status = "suspended";
     } else if (eventType === "SUBSCRIPTION_DELETED") {
       updates.status = "canceled";

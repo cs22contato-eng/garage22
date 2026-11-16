@@ -2,12 +2,15 @@ import React from 'react';
 import {
   LayoutDashboard,
   CarFront,
+  CalendarClock,
   Store,
   CreditCard,
   Settings,
   LogOut,
   Plus,
   AlertTriangle,
+  ArrowLeft,
+  Home,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -15,11 +18,21 @@ interface AppShellProps {
   currentPath: string;
   navigate: (to: string) => void;
   title: string;
+  backTo?: string;
+  backLabel?: string;
   primaryAction?: { label: string; onClick: () => void };
   children: React.ReactNode;
 }
 
-export function AppShell({ currentPath, navigate, title, primaryAction, children }: AppShellProps) {
+export function AppShell({
+  currentPath,
+  navigate,
+  title,
+  backTo,
+  backLabel = 'Voltar',
+  primaryAction,
+  children,
+}: AppShellProps) {
   const { user, company, subscription, logout } = useAuth();
 
   const isSuspended = subscription && !subscription.has_access;
@@ -28,6 +41,7 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
   const navItems = [
     { label: 'Painel', path: '/app/painel', icon: LayoutDashboard },
     { label: 'Veículos', path: '/app/veiculos', icon: CarFront },
+    { label: 'Lembretes', path: '/app/lembretes', icon: CalendarClock },
     { label: 'Assinatura', path: '/app/assinatura', icon: CreditCard },
     { label: 'Ajustes', path: '/app/configuracoes', icon: Settings },
   ];
@@ -41,13 +55,18 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col lg:flex-row">
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white border-r border-slate-200 z-30">
-        <div className="px-6 h-16 flex items-center border-b border-slate-200">
+        <div className="px-5 h-16 flex items-center justify-between bg-brand-dark border-b border-slate-800">
           <button
             type="button"
             onClick={() => navigate('/app/painel')}
-            className="font-display text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap"
+            aria-label="CS22 Garage - Ir para o Painel"
+            className="flex items-center gap-2 focus:outline-none"
           >
-            CS22 Garage
+            <img
+              src="/assets/aistudio/Logo_automotivo_CS22_Garage_deb1d1bd.png"
+              alt="CS22 Garage"
+              className="h-9 w-auto object-contain"
+            />
           </button>
         </div>
 
@@ -67,7 +86,7 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
                 onClick={() => navigate(item.path)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
                   active
-                    ? 'bg-blue-50 text-blue-700'
+                    ? 'bg-blue-50 text-brand-blue font-semibold'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
                 }`}
               >
@@ -87,6 +106,15 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
               <span>Abrir Vitrine</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors whitespace-nowrap"
+          >
+            <Home className="w-4 h-4 shrink-0" />
+            <span>Página inicial</span>
+          </button>
         </nav>
 
         <div className="p-4 border-t border-slate-200">
@@ -104,8 +132,33 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
       {/* Main Content Area */}
       <div className="flex-1 lg:pl-64 flex flex-col min-h-screen pb-20 lg:pb-8">
         {/* Top Bar (compact on mobile <= 56px) */}
-        <header className="sticky top-0 z-20 h-14 lg:h-16 bg-white/95 backdrop-blur-md border-b border-slate-200 px-4 lg:px-8 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
+        <header className="sticky top-0 z-20 h-14 lg:h-16 bg-white/95 backdrop-blur-md border-b border-slate-200 px-3 sm:px-4 lg:px-8 flex items-center justify-between gap-2 sm:gap-4">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            {backTo ? (
+              <button
+                type="button"
+                onClick={() => navigate(backTo)}
+                aria-label={backLabel}
+                className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-colors shrink-0"
+              >
+                <ArrowLeft className="w-4 h-4 shrink-0" />
+                <span className="hidden sm:inline">{backLabel}</span>
+                <span className="sm:hidden">Voltar</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                aria-label="Ir para página inicial"
+                className="lg:hidden w-9 h-9 rounded-lg overflow-hidden bg-brand-dark flex items-center justify-center shrink-0"
+              >
+                <img
+                  src="/favicon.png"
+                  alt="CS22"
+                  className="w-8 h-8 object-contain"
+                />
+              </button>
+            )}
             <h1 className="font-display text-base lg:text-lg font-bold text-slate-900 truncate">
               {title}
             </h1>
@@ -116,16 +169,27 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
               <button
                 type="button"
                 onClick={() => navigate(`/g/${company.slug}`)}
-                className="lg:hidden min-h-[40px] px-3 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors whitespace-nowrap"
+                className="lg:hidden min-h-[40px] px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors whitespace-nowrap"
               >
                 Vitrine
+              </button>
+            )}
+            {!backTo && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                title="Sair"
+                aria-label="Sair da conta"
+                className="lg:hidden min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
               </button>
             )}
             {primaryAction && !isSuspended && (
               <button
                 type="button"
                 onClick={primaryAction.onClick}
-                className="min-h-[40px] px-3.5 py-2 text-xs lg:text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                className="min-h-[40px] px-3 sm:px-3.5 py-2 text-xs lg:text-sm font-semibold text-white bg-brand-blue hover:bg-brand-blue-hover rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 <Plus className="w-4 h-4 shrink-0" />
                 <span>{primaryAction.label}</span>
@@ -143,7 +207,7 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
             <button
               type="button"
               onClick={() => navigate('/app/assinatura')}
-              className="font-semibold text-blue-700 hover:underline whitespace-nowrap shrink-0"
+              className="font-semibold text-brand-blue hover:underline whitespace-nowrap shrink-0"
             >
               Ver plano
             </button>
@@ -182,7 +246,7 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
               <button
                 type="button"
                 onClick={() => navigate('/app/assinatura')}
-                className="mt-5 w-full min-h-[44px] px-5 py-2.5 bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold rounded-xl transition-colors"
+                className="mt-5 w-full min-h-[44px] px-5 py-2.5 bg-brand-blue hover:bg-brand-blue-hover text-white text-sm font-semibold rounded-xl transition-colors"
               >
                 Ir para Assinatura
               </button>
@@ -193,9 +257,9 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
         </main>
       </div>
 
-      {/* Mobile Bottom Thumb Navigation Bar */}
+      {/* Mobile Bottom Thumb Navigation Bar (5 evenly spaced items) */}
       <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 pb-safe">
-        <div className="grid grid-cols-4 h-16 items-center">
+        <div className="grid grid-cols-5 h-16 items-center">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = currentPath.startsWith(item.path);
@@ -205,11 +269,13 @@ export function AppShell({ currentPath, navigate, title, primaryAction, children
                 type="button"
                 onClick={() => navigate(item.path)}
                 className={`min-h-[44px] flex flex-col items-center justify-center gap-1 transition-colors ${
-                  active ? 'text-blue-700' : 'text-slate-500'
+                  active ? 'text-brand-blue font-semibold' : 'text-slate-500'
                 }`}
               >
                 <Icon className="w-5 h-5" strokeWidth={active ? 2.25 : 1.75} />
-                <span className="text-[11px] font-medium tracking-tight">{item.label}</span>
+                <span className="text-[10px] font-medium tracking-tight truncate max-w-full px-0.5">
+                  {item.label}
+                </span>
               </button>
             );
           })}

@@ -1,4 +1,4 @@
-export type VehicleStatus = 'disponivel' | 'reservado' | 'vendido' | 'inativo';
+export type VehicleStatus = 'preparacao' | 'disponivel' | 'reservado' | 'vendido' | 'inativo';
 
 export type ExpenseCategory =
   | 'documentacao'
@@ -17,8 +17,46 @@ export type SubscriptionStatus =
   | 'suspended'
   | 'canceled';
 
-export type PlanCode = 'fundador_3990' | 'mensal_5990' | 'anual_599';
+export type PlanCode = 'mensal_5990' | 'fundador_3990' | 'anual_599';
+export const DEFAULT_PLAN_CODE: PlanCode = 'mensal_5990';
+export const DEFAULT_PLAN_PRICE = 49.9;
 export type PaymentMethod = 'PIX' | 'BOLETO' | 'CREDIT_CARD';
+
+export type ReminderCategory =
+  | 'ipva'
+  | 'licenciamento'
+  | 'seguro'
+  | 'revisao'
+  | 'financiamento'
+  | 'assinatura'
+  | 'outros';
+
+export interface DueReminder {
+  id: string;
+  company_id: string;
+  vehicle_id: string | null;
+  vehicle_label: string | null;
+  title: string;
+  category: ReminderCategory;
+  due_date: string;
+  amount: number | null;
+  notes: string;
+  completed_at: string | null;
+  canceled_at: string | null;
+  created_at: string;
+}
+
+export interface SubscriptionDueAlert {
+  level: 'info' | 'warning' | 'danger';
+  title: string;
+  description: string;
+  due_date: string | null;
+}
+
+export interface RemindersResponse {
+  reminders: DueReminder[];
+  subscription_alert: SubscriptionDueAlert | null;
+}
 
 export interface UserProfile {
   id: string;
@@ -34,6 +72,7 @@ export interface Company {
   whatsapp: string;
   instagram: string;
   address: string;
+  opening_hours: string;
   logo_url: string;
   cover_url: string;
   show_sold: boolean;
@@ -143,11 +182,15 @@ export interface VehicleDetailResponse {
 }
 
 export interface DashboardMetrics {
+  total_vehicles_count: number;
   available_count: number;
   sold_this_month_count: number;
   month_profit: number;
   tied_up_capital: number;
   avg_days_in_stock: number;
+  pending_reminders_count: number;
+  overdue_reminders_count: number;
+  upcoming_reminders: DueReminder[];
   stalled_vehicles: VehicleFinancial[];
 }
 
@@ -158,6 +201,7 @@ export interface PublicCompany {
   whatsapp: string;
   instagram: string;
   address: string;
+  opening_hours: string;
   logo_url: string;
   cover_url: string;
   show_sold: boolean;
@@ -215,7 +259,20 @@ export const EXPENSE_CATEGORY_LABELS: Record<ExpenseCategory, string> = {
   outros: 'Outros',
 };
 
+export const RESERVED_GARAGE_SLUGS = [
+  'admin',
+  'api',
+  'g',
+  'app',
+  'login',
+  'entrar',
+  'planos',
+  'cadastro',
+  'onboarding',
+];
+
 export const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {
+  preparacao: 'Em preparação',
   disponivel: 'Disponível',
   reservado: 'Reservado',
   vendido: 'Vendido',
@@ -228,6 +285,16 @@ export const SUBSCRIPTION_STATUS_LABELS: Record<SubscriptionStatus, string> = {
   overdue: 'Em atraso',
   suspended: 'Suspensa',
   canceled: 'Cancelada',
+};
+
+export const REMINDER_CATEGORY_LABELS: Record<ReminderCategory, string> = {
+  ipva: 'IPVA',
+  licenciamento: 'Licenciamento',
+  seguro: 'Seguro',
+  revisao: 'Revisão / Laudo',
+  financiamento: 'Financiamento / Parcela',
+  assinatura: 'Assinatura / Sistema',
+  outros: 'Outros',
 };
 
 export function formatBRL(value: number | null | undefined): string {
@@ -254,4 +321,15 @@ export function formatDateBR(isoDate: string | null | undefined): string {
   const parts = datePart.split('-');
   if (parts.length !== 3) return isoDate;
   return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+
+export function buildWhatsAppUrl(rawPhone: string | null | undefined, text?: string): string {
+  const digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  const normalized =
+    (digits.length === 10 || digits.length === 11) && !digits.startsWith('55')
+      ? `55${digits}`
+      : digits;
+  const query = text ? `?text=${encodeURIComponent(text)}` : '';
+  return `https://wa.me/${normalized}${query}`;
 }

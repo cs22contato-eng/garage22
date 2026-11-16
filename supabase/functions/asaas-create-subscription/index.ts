@@ -12,20 +12,38 @@ const ASAAS_BASE_URL =
     ? "https://api.asaas.com/v3"
     : "https://sandbox.asaas.com/api/v3";
 
-const PLAN_PRICES: Record<string, { value: number; cycle: string; label: string }> = {
-  fundador_3990: { value: 39.9, cycle: "MONTHLY", label: "CS22 Garage Fundador" },
-  mensal_5990: { value: 59.9, cycle: "MONTHLY", label: "CS22 Garage Mensal" },
-  anual_599: { value: 599.0, cycle: "YEARLY", label: "CS22 Garage Anual" },
+const SINGLE_PLAN = {
+  code: "mensal_5990",
+  value: 49.9,
+  cycle: "MONTHLY",
+  label: "CS22 Garage Plano Padrão",
 };
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405 });
+    return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+    return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
   const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -33,13 +51,18 @@ serve(async (req) => {
   });
   const { data: userData, error: userErr } = await userClient.auth.getUser();
   if (userErr || !userData.user) {
-    return new Response(JSON.stringify({ error: "Invalid session" }), { status: 401 });
+    return jsonResponse({ error: "Invalid session" }, 401);
   }
 
-  const { company_id, plan_code, payment_method, customer_name, customer_cpf_cnpj } = await req.json();
-  const plan = PLAN_PRICES[plan_code];
-  if (!plan || !["PIX", "BOLETO", "CREDIT_CARD"].includes(payment_method)) {
-    return new Response(JSON.stringify({ error: "Plano ou forma de pagamento inválidos" }), { status: 400 });
+  const { company_id, payment_method, customer_name, customer_cpf_cnpj } = await req.json();
+  const plan_code = SINGLE_PLAN.code;
+  const plan = SINGLE_PLAN;
+  const cleanCpfCnpj = String(customer_cpf_cnpj || "").replace(/\D/g, "");
+  if (!["PIX", "BOLETO", "CREDIT_CARD"].includes(payment_method)) {
+    return jsonResponse({ error: "Forma de pagamento inválida" }, 400);
+  }
+  if (cleanCpfCnpj.length !== 11 && cleanCpfCnpj.length !== 14) {
+    return jsonResponse({ error: "Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido." }, 400);
   }
 
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -53,23 +76,36 @@ serve(async (req) => {
     .single();
 
   if (!member) {
-    return new Response(JSON.stringify({ error: "Acesso negado à garagem" }), { status: 403 });
+    return jsonResponse({ error: "Acesso negado à garagem" }, 403);
   }
 
-  // Criar cliente no Asaas
-  const customerRes = await fetch(`${ASAAS_BASE_URL}/customers`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", access_token: ASAAS_API_KEY },
-    body: JSON.stringify({
-      name: customer_name,
-      email: userData.user.email,
-      cpfCnpj: customer_cpf_cnpj,
-      externalReference: company_id,
-    }),
-  });
-  const customer = await customerRes.json();
-  if (!customerRes.ok) {
-    return new Response(JSON.stringify({ error: "Erro ao criar cliente no Asaas", details: customer }), { status: 502 });
+  const { data: existingSub } = await adminClient
+    .from("subscriptions")
+    .select("asaas_customer_id")
+    .eq("company_id", company_id)
+    .maybeSingle();
+
+  let asaasCustomerId =
+    existingSub?.asaas_customer_id && !existingSub.asaas_customer_id.startsWith("cus_sbx_")
+      ? existingSub.asaas_customer_id
+      : null;
+
+  if (!asaasCustomerId) {
+    const customerRes = await fetch(`${ASAAS_BASE_URL}/customers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", access_token: ASAAS_API_KEY },
+      body: JSON.stringify({
+        name: customer_name || "Garagem CS22",
+        email: userData.user.email,
+        cpfCnpj: cleanCpfCnpj,
+        externalReference: company_id,
+      }),
+    });
+    const customer = await customerRes.json();
+    if (!customerRes.ok || !customer.id) {
+      return jsonResponse({ error: customer?.errors?.[0]?.description || "Erro ao criar cliente no Asaas", details: customer }, 502);
+    }
+    asaasCustomerId = customer.id;
   }
 
   // Criar assinatura mensal/anual no Asaas (liberação apenas via webhook confirmado)
@@ -78,7 +114,7 @@ serve(async (req) => {
     method: "POST",
     headers: { "Content-Type": "application/json", access_token: ASAAS_API_KEY },
     body: JSON.stringify({
-      customer: customer.id,
+      customer: asaasCustomerId,
       billingType: payment_method,
       value: plan.value,
       nextDueDate,
@@ -88,15 +124,30 @@ serve(async (req) => {
     }),
   });
   const asaasSub = await subRes.json();
-  if (!subRes.ok) {
-    return new Response(JSON.stringify({ error: "Erro ao criar assinatura no Asaas", details: asaasSub }), { status: 502 });
+  if (!subRes.ok || !asaasSub.id) {
+    return jsonResponse({ error: asaasSub?.errors?.[0]?.description || "Erro ao criar assinatura no Asaas", details: asaasSub }, 502);
+  }
+
+  let invoiceUrl: string | null = asaasSub.invoiceUrl ?? null;
+  if (!invoiceUrl) {
+    try {
+      const payRes = await fetch(`${ASAAS_BASE_URL}/subscriptions/${asaasSub.id}/payments?limit=1`, {
+        headers: { access_token: ASAAS_API_KEY },
+      });
+      if (payRes.ok) {
+        const payJson = await payRes.json();
+        invoiceUrl = payJson?.data?.[0]?.invoiceUrl ?? payJson?.data?.[0]?.bankSlipUrl ?? null;
+      }
+    } catch {
+      // Optional payment link lookup
+    }
   }
 
   await adminClient
     .from("subscriptions")
     .upsert({
       company_id,
-      asaas_customer_id: customer.id,
+      asaas_customer_id: asaasCustomerId,
       asaas_subscription_id: asaasSub.id,
       plan_code,
       payment_method,
@@ -112,10 +163,10 @@ serve(async (req) => {
     after_data: { plan_code, payment_method, asaas_subscription_id: asaasSub.id },
   });
 
-  return new Response(JSON.stringify({
+  return jsonResponse({
     asaas_subscription_id: asaasSub.id,
-    asaas_customer_id: customer.id,
-    invoice_url: asaasSub.invoiceUrl ?? null,
+    asaas_customer_id: asaasCustomerId,
+    invoice_url: invoiceUrl,
     status: "pending_webhook_confirmation",
-  }), { headers: { "Content-Type": "application/json" } });
+  });
 });

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sem internet — CS22 Garage</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #f8fafc;
+        color: #050b18;
+        display: flex;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        text-align: center;
+      }
+      .card {
+        max-width: 360px;
+        width: 100%;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        overflow: hidden;
+      }
+      .brand {
+        background: #050b18;
+        padding: 18px 24px;
+      }
+      .brand img {
+        height: 40px;
+        width: auto;
+        margin: 0 auto;
+        display: block;
+      }
+      .body {
+        padding: 24px;
+      }
+      h1 { font-size: 18px; margin: 0 0 8px; }
+      p { font-size: 14px; color: #475569; margin: 0 0 20px; }
+      button {
+        width: 100%;
+        min-height: 44px;
+        background: #0066ff;
+        color: #ffffff;
+        border: 0;
+        border-radius: 12px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="brand">
+        <img src="/assets/aistudio/Logo_automotivo_CS22_Garage_deb1d1bd.png" alt="CS22 Garage" />
+      </div>
+      <div class="body">
+        <h1>Você está offline</h1>
+        <p>Sem internet. Conecte-se para continuar.</p>
+        <button id="retry-btn" type="button" onclick="retryConnection()">Tentar novamente</button>
+      </div>
+    </div>
+    <script>
+      async function retryConnection() {
+        try {
+          if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister()));
+          }
+          if ('caches' in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k)));
+          }
+        } catch (e) {}
+        window.location.replace('/');
+      }
+      if (navigator.onLine) {
+        fetch('/manifest.webmanifest', { cache: 'no-store' })
+          .then((res) => {
+            if (res.ok) retryConnection();
+          })
+          .catch(() => {});
+      }
+    </script>
+  </body>
+</html>

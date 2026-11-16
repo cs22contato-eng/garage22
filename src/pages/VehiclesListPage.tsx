@@ -17,6 +17,7 @@ interface VehiclesListPageProps {
 
 const FILTER_OPTIONS: Array<{ value: '' | VehicleStatus; label: string }> = [
   { value: '', label: 'Todos' },
+  { value: 'preparacao', label: 'Em preparação' },
   { value: 'disponivel', label: 'Disponíveis' },
   { value: 'reservado', label: 'Reservados' },
   { value: 'vendido', label: 'Vendidos' },
@@ -63,7 +64,7 @@ export function VehiclesListPage({ navigate }: VehiclesListPageProps) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar marca, modelo ou placa..."
-            className="w-full h-11 pl-10 pr-4 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700"
+            className="w-full h-11 pl-10 pr-4 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
           />
         </div>
 
@@ -104,7 +105,7 @@ export function VehiclesListPage({ navigate }: VehiclesListPageProps) {
           <button
             type="button"
             onClick={() => navigate('/app/veiculos/novo')}
-            className="mt-5 min-h-[44px] px-5 py-2.5 bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold rounded-xl inline-flex items-center gap-2 transition-colors"
+            className="mt-5 min-h-[44px] px-5 py-2.5 bg-brand-blue hover:bg-brand-blue-hover text-white text-sm font-semibold rounded-xl inline-flex items-center gap-2 transition-colors"
           >
             <Plus className="w-4 h-4" />
             <span>Cadastrar primeiro veículo</span>
@@ -135,10 +136,12 @@ export function VehiclesListPage({ navigate }: VehiclesListPageProps) {
                       className={`text-[11px] font-semibold shrink-0 ${
                         car.status === 'disponivel'
                           ? 'text-emerald-700'
+                          : car.status === 'preparacao'
+                          ? 'text-slate-700'
                           : car.status === 'reservado'
                           ? 'text-amber-700'
                           : car.status === 'vendido'
-                          ? 'text-blue-700'
+                          ? 'text-brand-blue'
                           : 'text-slate-500'
                       }`}
                     >
@@ -216,10 +219,12 @@ export function VehiclesListPage({ navigate }: VehiclesListPageProps) {
                         className={`text-xs font-semibold ${
                           car.status === 'disponivel'
                             ? 'text-emerald-700'
+                            : car.status === 'preparacao'
+                            ? 'text-slate-700'
                             : car.status === 'reservado'
                             ? 'text-amber-700'
                             : car.status === 'vendido'
-                            ? 'text-blue-700'
+                            ? 'text-brand-blue'
                             : 'text-slate-500'
                         }`}
                       >

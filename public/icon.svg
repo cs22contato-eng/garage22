@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#0F172A"/>
+  <rect x="44" y="44" width="424" height="424" rx="84" fill="none" stroke="#1E293B" stroke-width="6"/>
+  <text x="256" y="242" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="136" fill="#FFFFFF" letter-spacing="-4">CS22</text>
+  <rect x="136" y="278" width="240" height="8" rx="4" fill="#15803D"/>
+  <text x="256" y="346" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="700" font-size="52" fill="#94A3B8" letter-spacing="6">GARAGE</text>
+</svg>

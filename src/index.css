@@ -4,6 +4,12 @@
   --font-display: "Plus Jakarta Sans", system-ui, sans-serif;
   --font-sans: "DM Sans", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-brand-dark: #050b18;
+  --color-brand-navy: #0a1428;
+  --color-brand-blue: #0066ff;
+  --color-brand-blue-hover: #0052cc;
+  --color-brand-sky: #00a3ff;
+  --color-brand-green: #15803d;
 }
 
 @layer base {

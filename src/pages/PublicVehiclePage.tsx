@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Share2, MessageCircle, Check, MapPin } from 'lucide-react';
 import { apiRequest } from '../lib/api';
-import { formatBRL, formatKm, type PublicCompany, type PublicVehicle } from '../types/garage';
+import { buildWhatsAppUrl, formatBRL, formatKm, type PublicCompany, type PublicVehicle } from '../types/garage';
 import { VehicleImage } from '../components/VehicleImage';
 
 interface PublicVehiclePageProps {
@@ -74,7 +74,10 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
     const msg = `Olá, ${company.name}! Tenho interesse no ${vehicle.brand} ${vehicle.model} ${vehicle.version} (${vehicle.manufacture_year}/${vehicle.model_year}) anunciado por ${formatBRL(
       vehicle.announced_price
     )}. Link: ${link}`;
-    window.location.href = `https://wa.me/${company.whatsapp}?text=${encodeURIComponent(msg)}`;
+    const waUrl = buildWhatsAppUrl(company.whatsapp, msg);
+    if (waUrl) {
+      window.location.href = waUrl;
+    }
   };
 
   const handleShare = async () => {
@@ -118,13 +121,22 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
           <p className="mt-2 text-sm text-slate-600">
             {error || 'Este veículo já foi vendido ou removido da vitrine.'}
           </p>
-          <button
-            type="button"
-            onClick={() => navigate(`/g/${garageSlug}`)}
-            className="mt-6 min-h-[44px] px-5 py-2.5 bg-slate-900 text-white text-sm font-semibold rounded-xl"
-          >
-            Ver outros veículos da garagem
-          </button>
+          <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => navigate(`/g/${garageSlug}`)}
+              className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 bg-brand-blue hover:bg-brand-blue-hover text-white text-sm font-semibold rounded-xl"
+            >
+              Voltar para a vitrine
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-sm font-semibold rounded-xl"
+            >
+              Voltar ao início
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -137,22 +149,22 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-24 lg:pb-12">
       {/* Compact Sticky Top Bar */}
-      <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-slate-200 h-14 px-4 sm:px-6 flex items-center justify-between gap-4">
+      <header className="sticky top-0 z-20 bg-brand-dark text-white border-b border-slate-800 h-14 px-4 sm:px-6 flex items-center justify-between gap-4">
         <button
           type="button"
           onClick={() => navigate(`/g/${garageSlug}`)}
-          className="min-h-[40px] inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-700 hover:text-slate-900 truncate"
+          className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-white truncate"
         >
           <ArrowLeft className="w-4 h-4 shrink-0" />
-          <span className="truncate">{company.name}</span>
+          <span className="truncate">Voltar · {company.name}</span>
         </button>
 
         <button
           type="button"
           onClick={handleShare}
-          className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 shrink-0"
+          className="min-h-[38px] px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 shrink-0"
         >
-          {copied ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Share2 className="w-3.5 h-3.5" />}
+          {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5" />}
           <span>{copied ? 'Copiado' : 'Compartilhar'}</span>
         </button>
       </header>
@@ -168,7 +180,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
                 className="w-full h-full object-cover"
               />
               {isSold && (
-                <div className="absolute inset-0 bg-slate-900/55 flex items-center justify-center">
+                <div className="absolute inset-0 bg-brand-dark/65 flex items-center justify-center">
                   <span className="px-4 py-1.5 bg-white text-slate-900 text-sm font-bold rounded-xl">
                     Vendido
                   </span>
@@ -184,7 +196,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
                     type="button"
                     onClick={() => setSelectedPhotoIdx(idx)}
                     className={`w-20 h-16 rounded-xl overflow-hidden border-2 shrink-0 transition-colors ${
-                      selectedPhotoIdx === idx ? 'border-blue-700' : 'border-transparent opacity-75 hover:opacity-100'
+                      selectedPhotoIdx === idx ? 'border-brand-blue' : 'border-transparent opacity-75 hover:opacity-100'
                     }`}
                   >
                     <VehicleImage src={p.storage_path} alt={`Foto ${idx + 1}`} className="w-full h-full object-cover" />
@@ -234,7 +246,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
                   <button
                     type="button"
                     onClick={handleWhatsAppClick}
-                    className="w-full min-h-[48px] px-5 py-3 bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2 transition-colors"
+                    className="w-full min-h-[48px] px-5 py-3 bg-brand-green hover:bg-emerald-800 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2 transition-colors"
                   >
                     <MessageCircle className="w-5 h-5" />
                     <span>Falar no WhatsApp sobre este carro</span>
@@ -278,7 +290,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
           <button
             type="button"
             onClick={handleWhatsAppClick}
-            className="w-full min-h-[48px] px-5 py-3 bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2 transition-colors"
+            className="w-full min-h-[48px] px-5 py-3 bg-brand-green hover:bg-emerald-800 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2 transition-colors"
           >
             <MessageCircle className="w-5 h-5" />
             <span>Chamar no WhatsApp · {formatBRL(vehicle.announced_price)}</span>

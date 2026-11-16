@@ -1,21 +1,53 @@
 import 'dotenv/config';
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createServer as createViteServer } from 'vite';
+import { createClient } from '@supabase/supabase-js';
 import { db, hashPassword, verifyPassword, slugify, initSchemaAndSeed } from './src/server/db.ts';
+import * as supa from './src/server/supabaseStore.ts';
 
 initSchemaAndSeed();
 
-const PORT = 3000;
-const SESSION_SECRET = process.env.AUTH_SESSION_SECRET || 'dev-cs22-garage-session-secret';
-const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_TOKEN || 'cs22_sandbox_webhook_token';
-const ASAAS_API_KEY = process.env.ASAAS_API_KEY || '';
+const PORT = Number(process.env.PORT || 3000);
+const SESSION_SECRET =
+  (process.env.AUTH_SESSION_SECRET || '').trim() ||
+  (process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? crypto
+        .createHmac('sha256', 'cs22-garage-session-key-v1')
+        .update(process.env.SUPABASE_SERVICE_ROLE_KEY.trim())
+        .digest('hex')
+    : crypto.randomBytes(32).toString('hex'));
+const rawWebhookToken = (process.env.ASAAS_WEBHOOK_TOKEN || '').trim().replace(/^['"]|['"]$/g, '');
+const ASAAS_WEBHOOK_TOKEN =
+  rawWebhookToken || (process.env.NODE_ENV === 'production' ? '' : 'cs22_sandbox_webhook_token');
+const ASAAS_API_KEY = (process.env.ASAAS_API_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+const ASAAS_ENV: 'sandbox' | 'production' = ASAAS_API_KEY.startsWith('$aact_prod_')
+  ? 'production'
+  : ASAAS_API_KEY.startsWith('$aact_hmlg_')
+    ? 'sandbox'
+    : process.env.ASAAS_ENV === 'production'
+      ? 'production'
+      : 'sandbox';
 const ASAAS_BASE_URL =
-  process.env.ASAAS_ENV === 'production'
+  ASAAS_ENV === 'production'
     ? 'https://api.asaas.com/v3'
     : 'https://sandbox.asaas.com/api/v3';
+
+const REQUIRED_SUPABASE_TABLES = [
+  'companies',
+  'company_members',
+  'vehicles',
+  'vehicle_photos',
+  'vehicle_expenses',
+  'vehicle_sales',
+  'vehicle_daily_stats',
+  'subscriptions',
+  'asaas_events',
+  'audit_logs',
+  'due_reminders',
+] as const;
 
 interface AuthPayload {
   sub: string;
@@ -118,13 +150,41 @@ function writeAuditLog(
   );
 }
 
-function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
+async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Sessão não informada. Faça login novamente.' });
     return;
   }
-  const payload = verifyToken(authHeader.slice(7));
+  const bearer = authHeader.slice(7);
+  const payload = verifyToken(bearer);
+
+  if (supa.isSupabaseBackendEnabled) {
+    try {
+      if (payload) {
+        const user = await supa.getSupabaseUserById(payload.sub);
+        if (user) {
+          req.userId = user.id;
+          req.userEmail = user.email || payload.email;
+          next();
+          return;
+        }
+      }
+      const { data } = await supa.getSupabaseAdmin().auth.getUser(bearer);
+      if (data?.user) {
+        req.userId = data.user.id;
+        req.userEmail = data.user.email || '';
+        next();
+        return;
+      }
+      res.status(401).json({ error: 'Sessão expirada ou inválida.' });
+      return;
+    } catch {
+      res.status(401).json({ error: 'Sessão expirada ou inválida.' });
+      return;
+    }
+  }
+
   if (!payload) {
     res.status(401).json({ error: 'Sessão expirada ou inválida.' });
     return;
@@ -140,11 +200,32 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
 }
 
 function requireCompany(allowSuspended = false) {
-  return (req: AuthedRequest, res: Response, next: NextFunction) => {
+  return async (req: AuthedRequest, res: Response, next: NextFunction) => {
     if (!req.userId) {
       res.status(401).json({ error: 'Não autenticado.' });
       return;
     }
+
+    if (supa.isSupabaseBackendEnabled) {
+      const ctx = await supa.getMembershipAndCompany(req.userId);
+      if (!ctx) {
+        res.status(404).json({ error: 'Garagem não cadastrada.', code: 'NO_COMPANY' });
+        return;
+      }
+      req.companyId = ctx.membership.company_id;
+      req.memberRole = ctx.membership.role;
+      req.hasActiveAccess = ctx.access.has_access;
+      if (!allowSuspended && !ctx.access.has_access) {
+        res.status(402).json({
+          error: 'Assinatura suspensa ou período de teste encerrado. Regularize o pagamento para liberar o acesso.',
+          code: 'SUBSCRIPTION_SUSPENDED',
+        });
+        return;
+      }
+      next();
+      return;
+    }
+
     const membership = db.prepare(`
       SELECT cm.company_id, cm.role
       FROM company_members cm
@@ -198,7 +279,8 @@ function rateLimitPublic(maxPerMinute: number) {
   };
 }
 
-const VALID_STATUSES = new Set(['disponivel', 'reservado', 'vendido', 'inativo']);
+const RESERVED_SLUGS = new Set(['admin', 'api', 'g', 'app', 'login', 'entrar', 'planos', 'cadastro', 'onboarding']);
+const VALID_STATUSES = new Set(['preparacao', 'disponivel', 'reservado', 'vendido', 'inativo']);
 const VALID_CATEGORIES = new Set([
   'documentacao',
   'mecanica',
@@ -211,13 +293,37 @@ const VALID_CATEGORIES = new Set([
 ]);
 
 async function startServer() {
+  if (supa.isSupabaseEnvConfigured) {
+    const ready = await supa.refreshSupabaseReadiness();
+    if (!ready) {
+      console.warn('Supabase conectado, mas tabelas ainda não criadas. Execute supabase/migrations/001_cs22_garage_mvp.sql no SQL Editor.');
+    }
+  }
+
   const app = express();
+  app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+  });
   app.use(express.json({ limit: '15mb' }));
+
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      status: 'healthy',
+      database: supa.isSupabaseBackendEnabled ? 'supabase' : 'sqlite',
+      env: process.env.NODE_ENV === 'production' ? 'production' : 'development',
+    });
+  });
 
   // ===========================================================================
   // AUTH ROUTES
   // ===========================================================================
-  app.post('/api/auth/register', (req, res) => {
+  app.post('/api/auth/register', rateLimitPublic(20), async (req, res) => {
     const { email, password, name } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     const cleanName = String(name || '').trim();
@@ -228,6 +334,12 @@ async function startServer() {
       return;
     }
 
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.registerUser(cleanEmail, cleanPassword, cleanName, signToken);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail);
     if (existing) {
       res.status(409).json({ error: 'Já existe uma conta cadastrada com este e-mail.' });
@@ -235,23 +347,30 @@ async function startServer() {
     }
 
     const userId = crypto.randomUUID();
-    const verificationToken = crypto.randomBytes(16).toString('hex');
     db.prepare(`
       INSERT INTO users (id, email, name, password_hash, email_verified, verification_token)
-      VALUES (?, ?, ?, ?, 0, ?)
-    `).run(userId, cleanEmail, cleanName, hashPassword(cleanPassword), verificationToken);
+      VALUES (?, ?, ?, ?, 1, NULL)
+    `).run(userId, cleanEmail, cleanName, hashPassword(cleanPassword));
 
+    const jwt = signToken(userId, cleanEmail);
     res.status(201).json({
-      message: 'Conta criada. Confirme seu e-mail para entrar.',
+      message: 'Conta criada com sucesso.',
       email: cleanEmail,
-      verification_token: verificationToken,
+      token: jwt,
+      user: { id: userId, email: cleanEmail, name: cleanName, email_verified: true },
     });
   });
 
-  app.post('/api/auth/confirm-email', (req, res) => {
+  app.post('/api/auth/confirm-email', rateLimitPublic(20), async (req, res) => {
     const { email, token } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     const cleanToken = String(token || '').trim();
+
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.confirmEmail(cleanEmail, cleanToken, signToken);
+      res.status(result.status).json(result.body);
+      return;
+    }
 
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(cleanEmail) as any;
     if (!user) {
@@ -259,7 +378,13 @@ async function startServer() {
       return;
     }
     if (user.email_verified) {
-      res.json({ ok: true, message: 'E-mail já confirmado.' });
+      const jwt = signToken(user.id, user.email);
+      res.json({
+        ok: true,
+        token: jwt,
+        message: 'E-mail já confirmado.',
+        user: { id: user.id, email: user.email, name: user.name, email_verified: true },
+      });
       return;
     }
     if (!cleanToken || user.verification_token !== cleanToken) {
@@ -276,10 +401,16 @@ async function startServer() {
     });
   });
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', rateLimitPublic(25), async (req, res) => {
     const { email, password } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     const cleanPassword = String(password || '');
+
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.loginUser(cleanEmail, cleanPassword, signToken);
+      res.status(result.status).json(result.body);
+      return;
+    }
 
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(cleanEmail) as any;
     if (!user || !verifyPassword(cleanPassword, user.password_hash)) {
@@ -291,7 +422,6 @@ async function startServer() {
       res.status(403).json({
         error: 'Confirme seu e-mail antes de acessar o painel.',
         code: 'EMAIL_NOT_VERIFIED',
-        verification_token: user.verification_token,
       });
       return;
     }
@@ -308,37 +438,46 @@ async function startServer() {
     });
   });
 
-  app.post('/api/auth/request-reset', (req, res) => {
+  app.post('/api/auth/request-reset', rateLimitPublic(10), async (req, res) => {
     const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
-    const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(cleanEmail) as any;
-    if (!user) {
-      res.json({ message: 'Se o e-mail existir, enviamos um código de recuperação.' });
+    const appUrl = (process.env.APP_URL || `${req.protocol}://${req.get('host') || 'localhost:3000'}`).replace(/\/$/, '');
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.requestPasswordReset(cleanEmail, `${appUrl}/recuperar-senha`);
+      res.status(result.status).json(result.body);
       return;
     }
-    const resetToken = crypto.randomBytes(4).toString('hex').toUpperCase();
-    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
-    db.prepare('UPDATE users SET reset_token = ?, reset_expires_at = ? WHERE id = ?').run(
-      resetToken,
-      expiresAt,
-      user.id
-    );
+    const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(cleanEmail) as any;
+    if (user) {
+      const resetToken = crypto.randomBytes(4).toString('hex').toUpperCase();
+      const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+      db.prepare('UPDATE users SET reset_token = ?, reset_expires_at = ? WHERE id = ?').run(
+        resetToken,
+        expiresAt,
+        user.id
+      );
+    }
     res.json({
-      message: 'Código de recuperação gerado.',
-      reset_token: resetToken,
+      message: 'Se o e-mail estiver cadastrado, enviaremos as instruções de recuperação.',
     });
   });
 
-  app.post('/api/auth/reset-password', (req, res) => {
+  app.post('/api/auth/reset-password', rateLimitPublic(15), async (req, res) => {
     const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
-    const token = String(req.body?.token || '').trim().toUpperCase();
+    const token = String(req.body?.token || '').trim();
     const newPassword = String(req.body?.new_password || '');
+
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.resetPassword(cleanEmail, token, newPassword);
+      res.status(result.status).json(result.body);
+      return;
+    }
 
     if (newPassword.length < 6) {
       res.status(400).json({ error: 'A nova senha deve ter pelo menos 6 caracteres.' });
       return;
     }
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(cleanEmail) as any;
-    if (!user || !user.reset_token || user.reset_token !== token) {
+    if (!user || !user.reset_token || user.reset_token !== token.toUpperCase()) {
       res.status(400).json({ error: 'Código de recuperação inválido.' });
       return;
     }
@@ -354,7 +493,40 @@ async function startServer() {
     res.json({ ok: true, message: 'Senha atualizada com sucesso.' });
   });
 
-  app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/auth/complete-recovery', rateLimitPublic(15), async (req, res) => {
+    const accessToken = String(req.body?.access_token || '').trim();
+    const newPassword = String(req.body?.new_password || '');
+
+    if (!supa.isSupabaseBackendEnabled) {
+      res.status(400).json({ error: 'Recuperação por link requer autenticação Supabase ativa.' });
+      return;
+    }
+
+    const result = await supa.completeRecovery(accessToken, newPassword);
+    res.status(result.status).json(result.body);
+  });
+
+  app.get('/api/auth/me', requireAuth, async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const sbUser = await supa.getSupabaseUserById(req.userId!);
+      if (!sbUser) {
+        res.status(401).json({ error: 'Usuário não encontrado.' });
+        return;
+      }
+      const ctx = await supa.getMembershipAndCompany(req.userId!);
+      res.json({
+        user: {
+          id: sbUser.id,
+          email: sbUser.email || req.userEmail,
+          name: sbUser.user_metadata?.name || sbUser.email || 'Lojista',
+          email_verified: Boolean(sbUser.email_confirmed_at),
+        },
+        company: ctx?.company ?? null,
+        subscription: ctx?.subscription ?? null,
+      });
+      return;
+    }
+
     const user = db
       .prepare('SELECT id, email, name, email_verified FROM users WHERE id = ?')
       .get(req.userId!) as any;
@@ -399,13 +571,27 @@ async function startServer() {
   // ===========================================================================
   // COMPANY ONBOARDING & SETTINGS
   // ===========================================================================
-  app.get('/api/companies/check-slug/:slug', requireAuth, (req, res) => {
+  app.get('/api/companies/check-slug/:slug', requireAuth, async (req, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      res.json(await supa.checkSlugAvailability(req.params.slug));
+      return;
+    }
     const candidate = slugify(req.params.slug);
+    if (RESERVED_SLUGS.has(candidate)) {
+      res.json({ slug: candidate, available: false, reserved: true });
+      return;
+    }
     const existing = db.prepare('SELECT id FROM companies WHERE slug = ?').get(candidate);
-    res.json({ slug: candidate, available: !existing });
+    res.json({ slug: candidate, available: !existing, reserved: false });
   });
 
-  app.post('/api/companies', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/companies', requireAuth, async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.createCompany(req.userId!, req.body);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const existingMembership = db
       .prepare('SELECT company_id FROM company_members WHERE user_id = ?')
       .get(req.userId!);
@@ -420,10 +606,16 @@ async function startServer() {
     const whatsapp = String(req.body?.whatsapp || '').replace(/\D/g, '');
     const instagram = String(req.body?.instagram || '').trim();
     const address = String(req.body?.address || '').trim();
+    const openingHours = String(req.body?.opening_hours || '').trim();
     const logoUrl = String(req.body?.logo_url || '').trim();
+    const coverUrl = String(req.body?.cover_url || '').trim();
 
     if (name.length < 2 || whatsapp.length < 10 || slug.length < 2) {
       res.status(400).json({ error: 'Informe nome da garagem, endereço do link e WhatsApp com DDD.' });
+      return;
+    }
+    if (RESERVED_SLUGS.has(slug)) {
+      res.status(400).json({ error: 'Este endereço é reservado pelo sistema. Escolha outro nome para o link.' });
       return;
     }
 
@@ -439,9 +631,9 @@ async function startServer() {
     db.exec('BEGIN');
     try {
       db.prepare(`
-        INSERT INTO companies (id, name, slug, whatsapp, instagram, address, logo_url, trial_ends_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(companyId, name, slug, whatsapp, instagram, address, logoUrl, trialEndsAt);
+        INSERT INTO companies (id, name, slug, whatsapp, instagram, address, opening_hours, logo_url, cover_url, trial_ends_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(companyId, name, slug, whatsapp, instagram, address, openingHours, logoUrl, coverUrl, trialEndsAt);
 
       db.prepare(`
         INSERT INTO company_members (id, company_id, user_id, role)
@@ -450,7 +642,7 @@ async function startServer() {
 
       db.prepare(`
         INSERT INTO subscriptions (id, company_id, plan_code, monthly_price, status, grace_days)
-        VALUES (?, ?, 'mensal_5990', 59.90, 'trialing', 5)
+        VALUES (?, ?, 'mensal_5990', 49.90, 'trialing', 5)
       `).run(crypto.randomUUID(), companyId);
 
       writeAuditLog(companyId, req.userId!, 'company_created', 'companies', companyId, null, { name, slug });
@@ -464,19 +656,30 @@ async function startServer() {
     res.status(201).json({ ...company, show_sold: Boolean(company.show_sold) });
   });
 
-  app.patch('/api/companies/current', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.patch('/api/companies/current', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.updateCurrentCompany(req.companyId!, req.userId!, req.body);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const current = db.prepare('SELECT * FROM companies WHERE id = ?').get(req.companyId!) as any;
     const name = String(req.body?.name ?? current.name).trim();
     const newSlug = req.body?.slug !== undefined ? slugify(String(req.body.slug)) : current.slug;
     const whatsapp = String(req.body?.whatsapp ?? current.whatsapp).replace(/\D/g, '');
     const instagram = String(req.body?.instagram ?? current.instagram).trim();
     const address = String(req.body?.address ?? current.address).trim();
+    const openingHours = String(req.body?.opening_hours ?? current.opening_hours ?? '').trim();
     const logoUrl = String(req.body?.logo_url ?? current.logo_url).trim();
     const coverUrl = String(req.body?.cover_url ?? current.cover_url).trim();
     const showSold = req.body?.show_sold !== undefined ? (req.body.show_sold ? 1 : 0) : current.show_sold;
 
     if (name.length < 2 || whatsapp.length < 10 || newSlug.length < 2) {
       res.status(400).json({ error: 'Nome, slug e WhatsApp válidos são obrigatórios.' });
+      return;
+    }
+    if (RESERVED_SLUGS.has(newSlug)) {
+      res.status(400).json({ error: 'Este endereço de vitrine é reservado. Escolha outro.' });
       return;
     }
     if (newSlug !== current.slug) {
@@ -489,9 +692,9 @@ async function startServer() {
 
     db.prepare(`
       UPDATE companies
-      SET name = ?, slug = ?, whatsapp = ?, instagram = ?, address = ?, logo_url = ?, cover_url = ?, show_sold = ?, updated_at = datetime('now')
+      SET name = ?, slug = ?, whatsapp = ?, instagram = ?, address = ?, opening_hours = ?, logo_url = ?, cover_url = ?, show_sold = ?, updated_at = datetime('now')
       WHERE id = ?
-    `).run(name, newSlug, whatsapp, instagram, address, logoUrl, coverUrl, showSold, req.companyId!);
+    `).run(name, newSlug, whatsapp, instagram, address, openingHours, logoUrl, coverUrl, showSold, req.companyId!);
 
     writeAuditLog(
       req.companyId!,
@@ -510,15 +713,20 @@ async function startServer() {
   // ===========================================================================
   // DASHBOARD (5 METRICS + STALLED VEHICLES > 60 DAYS) — COMPUTED IN SQL
   // ===========================================================================
-  app.get('/api/dashboard', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.get('/api/dashboard', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      res.json(await supa.getDashboard(req.companyId!));
+      return;
+    }
     const monthPrefix = new Date().toISOString().slice(0, 7); // YYYY-MM
 
     const metrics = db.prepare(`
       SELECT
+        COUNT(*) AS total_vehicles_count,
         SUM(CASE WHEN status = 'disponivel' THEN 1 ELSE 0 END) AS available_count,
         SUM(CASE WHEN status = 'vendido' AND substr(sale_date, 1, 7) = ? THEN 1 ELSE 0 END) AS sold_this_month_count,
         COALESCE(SUM(CASE WHEN status = 'vendido' AND substr(sale_date, 1, 7) = ? THEN profit ELSE 0 END), 0) AS month_profit,
-        COALESCE(SUM(CASE WHEN status IN ('disponivel', 'reservado', 'inativo') THEN total_cost ELSE 0 END), 0) AS tied_up_capital,
+        COALESCE(SUM(CASE WHEN status IN ('preparacao', 'disponivel', 'reservado', 'inativo') THEN total_cost ELSE 0 END), 0) AS tied_up_capital,
         COALESCE(CAST(ROUND(AVG(days_in_stock)) AS INTEGER), 0) AS avg_days_in_stock
       FROM v_vehicle_financials
       WHERE company_id = ?
@@ -528,17 +736,48 @@ async function startServer() {
       SELECT *
       FROM v_vehicle_financials
       WHERE company_id = ?
-        AND status IN ('disponivel', 'reservado', 'inativo')
+        AND status IN ('preparacao', 'disponivel', 'reservado', 'inativo')
         AND days_in_stock > 60
       ORDER BY days_in_stock DESC
     `).all(req.companyId!);
 
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const reminderStats = db.prepare(`
+      SELECT
+        COUNT(*) AS pending_reminders_count,
+        SUM(CASE WHEN due_date < ? THEN 1 ELSE 0 END) AS overdue_reminders_count
+      FROM due_reminders
+      WHERE company_id = ?
+        AND canceled_at IS NULL
+        AND completed_at IS NULL
+    `).get(todayIso, req.companyId!) as any;
+
+    const upcomingReminders = db.prepare(`
+      SELECT
+        r.*,
+        CASE
+          WHEN v.id IS NOT NULL THEN trim(v.brand || ' ' || v.model || ' ' || v.model_year)
+          ELSE NULL
+        END AS vehicle_label
+      FROM due_reminders r
+      LEFT JOIN vehicles v ON v.id = r.vehicle_id AND v.company_id = r.company_id
+      WHERE r.company_id = ?
+        AND r.canceled_at IS NULL
+        AND r.completed_at IS NULL
+      ORDER BY r.due_date ASC, r.created_at DESC
+      LIMIT 3
+    `).all(req.companyId!);
+
     res.json({
+      total_vehicles_count: metrics?.total_vehicles_count ?? 0,
       available_count: metrics?.available_count ?? 0,
       sold_this_month_count: metrics?.sold_this_month_count ?? 0,
       month_profit: metrics?.month_profit ?? 0,
       tied_up_capital: metrics?.tied_up_capital ?? 0,
       avg_days_in_stock: metrics?.avg_days_in_stock ?? 0,
+      pending_reminders_count: reminderStats?.pending_reminders_count ?? 0,
+      overdue_reminders_count: reminderStats?.overdue_reminders_count ?? 0,
+      upcoming_reminders: upcomingReminders,
       stalled_vehicles: stalledVehicles,
     });
   });
@@ -546,9 +785,14 @@ async function startServer() {
   // ===========================================================================
   // VEHICLES, PHOTOS, EXPENSES, SALES (MULTI-TENANT ISOLATED BY company_id)
   // ===========================================================================
-  app.get('/api/vehicles', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.get('/api/vehicles', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
     const statusFilter = String(req.query.status || '').trim();
     const search = String(req.query.q || '').trim().toLowerCase();
+
+    if (supa.isSupabaseBackendEnabled) {
+      res.json(await supa.listVehicles(req.companyId!, statusFilter, search));
+      return;
+    }
 
     let rows = db.prepare(`
       SELECT *
@@ -571,7 +815,12 @@ async function startServer() {
     res.json(rows);
   });
 
-  app.post('/api/vehicles', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.post('/api/vehicles', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.createVehicle(req.companyId!, req.userId!, req.body || {});
+      res.status(result.status).json(result.body);
+      return;
+    }
     const body = req.body || {};
     const brand = String(body.brand || '').trim();
     const model = String(body.model || '').trim();
@@ -648,7 +897,13 @@ async function startServer() {
     res.status(201).json(created);
   });
 
-  app.get('/api/vehicles/:id', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.get('/api/vehicles/:id', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.getVehicleDetail(req.companyId!, req.params.id);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const vehicle = db
       .prepare('SELECT * FROM v_vehicle_financials WHERE id = ? AND company_id = ?')
       .get(req.params.id, req.companyId!) as any;
@@ -677,7 +932,12 @@ async function startServer() {
     res.json({ vehicle, photos, expenses, sales, daily_stats: dailyStats });
   });
 
-  app.patch('/api/vehicles/:id', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.patch('/api/vehicles/:id', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.updateVehicle(req.companyId!, req.params.id, req.body);
+      res.status(result.status).json(result.body);
+      return;
+    }
     const current = db
       .prepare('SELECT * FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
       .get(req.params.id, req.companyId!) as any;
@@ -742,7 +1002,13 @@ async function startServer() {
     res.json(updated);
   });
 
-  app.delete('/api/vehicles/:id', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.delete('/api/vehicles/:id', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.softDeleteVehicle(req.companyId!, req.userId!, req.params.id);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const current = db
       .prepare('SELECT * FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
       .get(req.params.id, req.companyId!) as any;
@@ -759,7 +1025,13 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  app.put('/api/vehicles/:id/photos', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.put('/api/vehicles/:id/photos', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const photos: string[] = Array.isArray(req.body?.photos) ? req.body.photos : [];
+      const result = await supa.replaceVehiclePhotos(req.companyId!, req.params.id, photos);
+      res.status(result.status).json(result.body);
+      return;
+    }
     const current = db
       .prepare('SELECT id FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
       .get(req.params.id, req.companyId!) as any;
@@ -796,7 +1068,13 @@ async function startServer() {
   // ===========================================================================
   // EXPENSES (SOFT CANCEL ONLY)
   // ===========================================================================
-  app.post('/api/vehicles/:id/expenses', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.post('/api/vehicles/:id/expenses', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.addExpense(req.companyId!, req.params.id, req.body);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const vehicle = db
       .prepare('SELECT id FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
       .get(req.params.id, req.companyId!) as any;
@@ -826,7 +1104,13 @@ async function startServer() {
     res.status(201).json(created);
   });
 
-  app.post('/api/vehicles/:id/expenses/:expenseId/cancel', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.post('/api/vehicles/:id/expenses/:expenseId/cancel', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.cancelExpense(req.companyId!, req.userId!, req.params.id, req.params.expenseId);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const expense = db
       .prepare('SELECT * FROM vehicle_expenses WHERE id = ? AND vehicle_id = ? AND company_id = ? AND canceled_at IS NULL')
       .get(req.params.expenseId, req.params.id, req.companyId!) as any;
@@ -846,7 +1130,12 @@ async function startServer() {
   // ===========================================================================
   // SALES (REGISTER & CANCEL WITH PREVIOUS STATUS RESTORE)
   // ===========================================================================
-  app.post('/api/vehicles/:id/sell', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.post('/api/vehicles/:id/sell', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.sellVehicle(req.companyId!, req.userId!, req.params.id, req.body);
+      res.status(result.status).json(result.body);
+      return;
+    }
     const vehicle = db
       .prepare('SELECT * FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
       .get(req.params.id, req.companyId!) as any;
@@ -908,7 +1197,12 @@ async function startServer() {
     res.status(201).json(updatedVehicle);
   });
 
-  app.post('/api/vehicles/:id/sales/:saleId/cancel', requireAuth, requireCompany(), (req: AuthedRequest, res) => {
+  app.post('/api/vehicles/:id/sales/:saleId/cancel', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.cancelSale(req.companyId!, req.userId!, req.params.id, req.params.saleId);
+      res.status(result.status).json(result.body);
+      return;
+    }
     const vehicle = db
       .prepare('SELECT * FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
       .get(req.params.id, req.companyId!) as any;
@@ -959,9 +1253,232 @@ async function startServer() {
   });
 
   // ===========================================================================
+  // DUE REMINDERS (LEMBRETES DE VENCIMENTO)
+  // ===========================================================================
+  const VALID_REMINDER_CATEGORIES = new Set([
+    'ipva',
+    'licenciamento',
+    'seguro',
+    'revisao',
+    'financiamento',
+    'assinatura',
+    'outros',
+  ]);
+
+  app.get('/api/reminders', requireAuth, requireCompany(true), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      res.json(await supa.listReminders(req.companyId!));
+      return;
+    }
+
+    const company = db.prepare('SELECT * FROM companies WHERE id = ?').get(req.companyId!) as any;
+    const sub = db.prepare('SELECT * FROM subscriptions WHERE company_id = ?').get(req.companyId!) as any;
+    const access = computeSubscriptionState(company, sub);
+
+    const rows = db.prepare(`
+      SELECT
+        r.*,
+        CASE
+          WHEN v.id IS NOT NULL THEN trim(v.brand || ' ' || v.model || ' ' || v.model_year)
+          ELSE NULL
+        END AS vehicle_label
+      FROM due_reminders r
+      LEFT JOIN vehicles v ON v.id = r.vehicle_id AND v.company_id = r.company_id
+      WHERE r.company_id = ?
+        AND r.canceled_at IS NULL
+      ORDER BY
+        CASE WHEN r.completed_at IS NULL THEN 0 ELSE 1 END ASC,
+        r.due_date ASC,
+        r.created_at DESC
+    `).all(req.companyId!);
+
+    let subscriptionAlert: {
+      level: 'info' | 'warning' | 'danger';
+      title: string;
+      description: string;
+      due_date: string | null;
+    } | null = null;
+
+    if (sub) {
+      if (sub.status === 'suspended' || !access.has_access) {
+        subscriptionAlert = {
+          level: 'danger',
+          title: 'Assinatura vencida — acesso suspenso',
+          description: 'Regularize sua assinatura via Pix, boleto ou cartão para reativar a vitrine e os cadastros.',
+          due_date: sub.overdue_since || company?.trial_ends_at || null,
+        };
+      } else if (sub.status === 'overdue') {
+        subscriptionAlert = {
+          level: 'danger',
+          title: 'Pagamento da assinatura em atraso',
+          description: `Regularize dentro do período de tolerância (${sub.grace_days} dias) para não tirar sua vitrine do ar.`,
+          due_date: sub.overdue_since || null,
+        };
+      } else if (sub.status === 'trialing') {
+        subscriptionAlert = {
+          level: access.days_left_in_trial <= 2 ? 'warning' : 'info',
+          title:
+            access.days_left_in_trial <= 1
+              ? 'Último dia do período de teste grátis'
+              : `Teste grátis termina em ${access.days_left_in_trial} dias`,
+          description: 'Ative seu plano na aba Assinatura para manter a vitrine pública sem interrupção.',
+          due_date: company?.trial_ends_at ? String(company.trial_ends_at).slice(0, 10) : null,
+        };
+      } else if (sub.status === 'active' && sub.current_period_end) {
+        const daysToRenew = Math.ceil((new Date(sub.current_period_end).getTime() - Date.now()) / 86400_000);
+        if (daysToRenew <= 7) {
+          subscriptionAlert = {
+            level: 'info',
+            title: `Próxima cobrança da assinatura em ${Math.max(0, daysToRenew)} dias`,
+            description: 'Acompanhe a renovação automática do plano na página de Assinatura.',
+            due_date: String(sub.current_period_end).slice(0, 10),
+          };
+        }
+      }
+    }
+
+    res.json({
+      reminders: rows,
+      subscription_alert: subscriptionAlert,
+    });
+  });
+
+  app.post('/api/reminders', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.createReminder(req.companyId!, req.userId!, req.body);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
+    const title = String(req.body?.title || '').trim();
+    const category = String(req.body?.category || 'outros').trim();
+    const dueDate = String(req.body?.due_date || '').slice(0, 10);
+    const rawAmount = req.body?.amount;
+    const amount = rawAmount === '' || rawAmount === null || rawAmount === undefined ? null : Number(rawAmount);
+    const vehicleId = req.body?.vehicle_id ? String(req.body.vehicle_id).trim() : null;
+    const notes = String(req.body?.notes || '').trim();
+
+    if (!title || !dueDate || !VALID_REMINDER_CATEGORIES.has(category)) {
+      res.status(400).json({ error: 'Informe título, categoria e data de vencimento válidos.' });
+      return;
+    }
+    if (amount !== null && (Number.isNaN(amount) || amount < 0)) {
+      res.status(400).json({ error: 'Valor do vencimento inválido.' });
+      return;
+    }
+
+    if (vehicleId) {
+      const ownedVehicle = db
+        .prepare('SELECT id FROM vehicles WHERE id = ? AND company_id = ? AND deleted_at IS NULL')
+        .get(vehicleId, req.companyId!);
+      if (!ownedVehicle) {
+        res.status(404).json({ error: 'Veículo vinculado não encontrado na garagem.' });
+        return;
+      }
+    }
+
+    const reminderId = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO due_reminders (id, company_id, vehicle_id, title, category, due_date, amount, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(reminderId, req.companyId!, vehicleId, title, category, dueDate, amount, notes);
+
+    writeAuditLog(req.companyId!, req.userId!, 'reminder_created', 'due_reminders', reminderId, null, {
+      title,
+      category,
+      due_date: dueDate,
+      amount,
+    });
+
+    const created = db.prepare(`
+      SELECT
+        r.*,
+        CASE
+          WHEN v.id IS NOT NULL THEN trim(v.brand || ' ' || v.model || ' ' || v.model_year)
+          ELSE NULL
+        END AS vehicle_label
+      FROM due_reminders r
+      LEFT JOIN vehicles v ON v.id = r.vehicle_id AND v.company_id = r.company_id
+      WHERE r.id = ? AND r.company_id = ?
+    `).get(reminderId, req.companyId!);
+
+    res.status(201).json(created);
+  });
+
+  app.post('/api/reminders/:id/complete', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.toggleReminderComplete(req.companyId!, req.userId!, req.params.id);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
+    const existing = db
+      .prepare('SELECT * FROM due_reminders WHERE id = ? AND company_id = ? AND canceled_at IS NULL')
+      .get(req.params.id, req.companyId!) as any;
+
+    if (!existing) {
+      res.status(404).json({ error: 'Lembrete não encontrado.' });
+      return;
+    }
+
+    const nextCompleted = existing.completed_at ? null : new Date().toISOString();
+    db.prepare(`
+      UPDATE due_reminders
+      SET completed_at = ?, updated_at = datetime('now')
+      WHERE id = ? AND company_id = ?
+    `).run(nextCompleted, existing.id, req.companyId!);
+
+    writeAuditLog(
+      req.companyId!,
+      req.userId!,
+      nextCompleted ? 'reminder_completed' : 'reminder_reopened',
+      'due_reminders',
+      existing.id,
+      { completed_at: existing.completed_at },
+      { completed_at: nextCompleted }
+    );
+
+    const updated = db.prepare('SELECT * FROM due_reminders WHERE id = ? AND company_id = ?').get(
+      existing.id,
+      req.companyId!
+    );
+    res.json(updated);
+  });
+
+  app.post('/api/reminders/:id/cancel', requireAuth, requireCompany(), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.cancelReminder(req.companyId!, req.userId!, req.params.id);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
+    const existing = db
+      .prepare('SELECT * FROM due_reminders WHERE id = ? AND company_id = ? AND canceled_at IS NULL')
+      .get(req.params.id, req.companyId!) as any;
+
+    if (!existing) {
+      res.status(404).json({ error: 'Lembrete não encontrado.' });
+      return;
+    }
+
+    db.prepare(`
+      UPDATE due_reminders
+      SET canceled_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ? AND company_id = ?
+    `).run(existing.id, req.companyId!);
+
+    writeAuditLog(req.companyId!, req.userId!, 'reminder_canceled', 'due_reminders', existing.id, existing, null);
+    res.json({ ok: true });
+  });
+
+  // ===========================================================================
   // SUBSCRIPTION & ASAAS WEBHOOK FLOW
   // ===========================================================================
-  app.get('/api/subscription', requireAuth, requireCompany(true), (req: AuthedRequest, res) => {
+  app.get('/api/subscription', requireAuth, requireCompany(true), async (req: AuthedRequest, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      res.json(await supa.getSubscriptionOverview(req.companyId!));
+      return;
+    }
     const company = db.prepare('SELECT * FROM companies WHERE id = ?').get(req.companyId!) as any;
     const sub = db.prepare('SELECT * FROM subscriptions WHERE company_id = ?').get(req.companyId!) as any;
     const access = computeSubscriptionState(company, sub);
@@ -985,91 +1502,266 @@ async function startServer() {
     });
   });
 
+  app.get('/api/integrations/status', requireAuth, async (req, res) => {
+    const appUrl = (process.env.APP_URL || `${req.protocol}://${req.get('host') || 'localhost:3000'}`).replace(/\/$/, '');
+    const supabaseUrl = supa.normalizeSupabaseUrl(process.env.VITE_SUPABASE_URL);
+    const supabaseAnonConfigured = Boolean((process.env.VITE_SUPABASE_ANON_KEY || '').trim());
+    const supabaseServiceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+
+    const asaasStatus: {
+      configured: boolean;
+      env: 'sandbox' | 'production';
+      webhook_token_configured: boolean;
+      webhook_url: string;
+      reachable: boolean | null;
+      account_name: string | null;
+      error: string | null;
+    } = {
+      configured: Boolean(ASAAS_API_KEY),
+      env: ASAAS_ENV,
+      webhook_token_configured: Boolean(process.env.ASAAS_WEBHOOK_TOKEN),
+      webhook_url: `${appUrl}/api/webhooks/asaas`,
+      reachable: null,
+      account_name: null,
+      error: null,
+    };
+
+    if (ASAAS_API_KEY) {
+      try {
+        const accountRes = await fetch(`${ASAAS_BASE_URL}/myAccount`, {
+          headers: { access_token: ASAAS_API_KEY },
+          signal: AbortSignal.timeout(4000),
+        });
+        const accountJson = (await accountRes.json().catch(() => ({}))) as any;
+        if (accountRes.ok) {
+          asaasStatus.reachable = true;
+          asaasStatus.account_name = accountJson?.name || accountJson?.tradingName || null;
+        } else {
+          asaasStatus.reachable = false;
+          asaasStatus.error =
+            accountJson?.errors?.[0]?.description || `Erro HTTP ${accountRes.status} ao validar chave Asaas.`;
+        }
+      } catch (err) {
+        asaasStatus.reachable = false;
+        asaasStatus.error = err instanceof Error ? err.message : 'Falha de conexão com a API do Asaas.';
+      }
+    }
+
+    const supabaseStatus: {
+      url_configured: boolean;
+      anon_key_configured: boolean;
+      service_role_configured: boolean;
+      configured: boolean;
+      reachable: boolean | null;
+      tables_ready: boolean | null;
+      missing_tables: string[];
+      error: string | null;
+      seed_error: string | null;
+    } = {
+      url_configured: Boolean(supabaseUrl),
+      anon_key_configured: supabaseAnonConfigured,
+      service_role_configured: Boolean(supabaseServiceKey),
+      configured: Boolean(supabaseUrl && supabaseServiceKey),
+      reachable: null,
+      tables_ready: null,
+      missing_tables: [],
+      error: null,
+      seed_error: supa.getLastSeedError(),
+    };
+
+    if (supabaseUrl && supabaseServiceKey) {
+      try {
+        const adminClient = createClient(supabaseUrl, supabaseServiceKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const checks = await Promise.all(
+          REQUIRED_SUPABASE_TABLES.map(async (tableName) => {
+            const { error } = await adminClient.from(tableName).select('*').limit(1);
+            return { tableName, error };
+          })
+        );
+        const missing: string[] = [];
+        let connError: string | null = null;
+        for (const c of checks) {
+          if (c.error) {
+            if (
+              c.error.code === '42P01' ||
+              c.error.code === 'PGRST205' ||
+              /does not exist|schema cache|could not find the table/i.test(c.error.message || '')
+            ) {
+              missing.push(c.tableName);
+            } else if (!connError) {
+              connError = c.error.message || `Erro código ${c.error.code || 'desconhecido'}`;
+            }
+          }
+        }
+        supabaseStatus.reachable = connError === null;
+        supabaseStatus.missing_tables = missing;
+        supabaseStatus.tables_ready = connError === null && missing.length === 0;
+        supabaseStatus.error = connError;
+        if (supabaseStatus.tables_ready && !supa.isSupabaseBackendEnabled) {
+          await supa.refreshSupabaseReadiness();
+        }
+        supabaseStatus.seed_error = supa.getLastSeedError();
+      } catch (err) {
+        supabaseStatus.reachable = false;
+        supabaseStatus.tables_ready = false;
+        supabaseStatus.error = err instanceof Error ? err.message : 'Falha ao conectar no Supabase.';
+      }
+    }
+
+    res.json({
+      active_database: supa.isSupabaseBackendEnabled ? 'supabase' : 'sqlite',
+      asaas: asaasStatus,
+      supabase: supabaseStatus,
+    });
+  });
+
   app.post('/api/subscription/checkout', requireAuth, requireCompany(true), async (req: AuthedRequest, res) => {
-    const planCode = String(req.body?.plan_code || 'mensal_5990');
+    const planCode = 'mensal_5990';
     const paymentMethod = String(req.body?.payment_method || 'PIX');
     const customerName = String(req.body?.customer_name || '').trim();
     const cpfCnpj = String(req.body?.cpf_cnpj || '').replace(/\D/g, '');
 
-    const PLAN_PRICES: Record<string, { value: number; cycle: string; label: string }> = {
-      fundador_3990: { value: 39.9, cycle: 'MONTHLY', label: 'CS22 Garage Fundador' },
-      mensal_5990: { value: 59.9, cycle: 'MONTHLY', label: 'CS22 Garage Mensal' },
-      anual_599: { value: 599.0, cycle: 'YEARLY', label: 'CS22 Garage Anual' },
-    };
+    const plan = { value: 49.9, cycle: 'MONTHLY', label: 'CS22 Garage Plano Padrão' };
 
-    const plan = PLAN_PRICES[planCode];
-    if (!plan || !['PIX', 'BOLETO', 'CREDIT_CARD'].includes(paymentMethod)) {
-      res.status(400).json({ error: 'Plano ou forma de pagamento inválidos.' });
+    if (!['PIX', 'BOLETO', 'CREDIT_CARD'].includes(paymentMethod)) {
+      res.status(400).json({ error: 'Forma de pagamento inválida.' });
       return;
     }
+
+    const reusableCustomerId = supa.isSupabaseBackendEnabled
+      ? await supa.getExistingAsaasCustomerId(req.companyId!)
+      : (() => {
+          const row = db
+            .prepare('SELECT asaas_customer_id FROM subscriptions WHERE company_id = ?')
+            .get(req.companyId!) as { asaas_customer_id?: string | null } | undefined;
+          return row?.asaas_customer_id && !row.asaas_customer_id.startsWith('cus_sbx_')
+            ? row.asaas_customer_id
+            : null;
+        })();
 
     let asaasCustomerId = `cus_sbx_${crypto.randomBytes(6).toString('hex')}`;
     let asaasSubscriptionId = `sub_sbx_${crypto.randomBytes(6).toString('hex')}`;
     let invoiceUrl: string | null = null;
+    let checkoutMode: 'asaas_api' | 'sandbox_simulated' = 'sandbox_simulated';
 
     if (ASAAS_API_KEY) {
+      if (cpfCnpj.length !== 11 && cpfCnpj.length !== 14) {
+        res.status(400).json({ error: 'Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para cobrança no Asaas.' });
+        return;
+      }
+
       try {
-        const custRes = await fetch(`${ASAAS_BASE_URL}/customers`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', access_token: ASAAS_API_KEY },
-          body: JSON.stringify({
-            name: customerName || 'Garagem CS22',
-            email: req.userEmail,
-            cpfCnpj: cpfCnpj || undefined,
-            externalReference: req.companyId,
-          }),
-        });
-        const custJson = (await custRes.json()) as any;
-        if (custRes.ok && custJson.id) {
-          asaasCustomerId = custJson.id;
-          const subRes = await fetch(`${ASAAS_BASE_URL}/subscriptions`, {
+        if (reusableCustomerId) {
+          asaasCustomerId = reusableCustomerId;
+        } else {
+          const custRes = await fetch(`${ASAAS_BASE_URL}/customers`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', access_token: ASAAS_API_KEY },
             body: JSON.stringify({
-              customer: asaasCustomerId,
-              billingType: paymentMethod,
-              value: plan.value,
-              nextDueDate: new Date().toISOString().slice(0, 10),
-              cycle: plan.cycle,
-              description: plan.label,
+              name: customerName || 'Garagem CS22',
+              email: req.userEmail,
+              cpfCnpj,
               externalReference: req.companyId,
             }),
           });
-          const subJson = (await subRes.json()) as any;
-          if (subRes.ok && subJson.id) {
-            asaasSubscriptionId = subJson.id;
-            invoiceUrl = subJson.invoiceUrl ?? null;
+          const custJson = (await custRes.json()) as any;
+          if (!custRes.ok || !custJson.id) {
+            const asaasErr = custJson?.errors?.[0]?.description || 'Não foi possível cadastrar o cliente no Asaas.';
+            res.status(custRes.status >= 400 && custRes.status < 500 ? 400 : 502).json({ error: asaasErr });
+            return;
+          }
+          asaasCustomerId = custJson.id;
+        }
+
+        const subRes = await fetch(`${ASAAS_BASE_URL}/subscriptions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', access_token: ASAAS_API_KEY },
+          body: JSON.stringify({
+            customer: asaasCustomerId,
+            billingType: paymentMethod,
+            value: plan.value,
+            nextDueDate: new Date().toISOString().slice(0, 10),
+            cycle: plan.cycle,
+            description: plan.label,
+            externalReference: req.companyId,
+          }),
+        });
+        const subJson = (await subRes.json()) as any;
+        if (!subRes.ok || !subJson.id) {
+          const asaasErr = subJson?.errors?.[0]?.description || 'Não foi possível gerar a assinatura no Asaas.';
+          res.status(subRes.status >= 400 && subRes.status < 500 ? 400 : 502).json({ error: asaasErr });
+          return;
+        }
+
+        asaasSubscriptionId = subJson.id;
+        invoiceUrl = subJson.invoiceUrl ?? null;
+        checkoutMode = 'asaas_api';
+
+        if (!invoiceUrl) {
+          try {
+            const payRes = await fetch(`${ASAAS_BASE_URL}/subscriptions/${asaasSubscriptionId}/payments?limit=1`, {
+              headers: { access_token: ASAAS_API_KEY },
+            });
+            if (payRes.ok) {
+              const payJson = (await payRes.json()) as any;
+              invoiceUrl = payJson?.data?.[0]?.invoiceUrl ?? payJson?.data?.[0]?.bankSlipUrl ?? null;
+            }
+          } catch {
+            // Optional lookup for invoice link
           }
         }
       } catch (err) {
-        console.error('Asaas API fallback to sandbox checkout:', err);
+        const message = err instanceof Error ? err.message : 'Falha de comunicação com o Asaas.';
+        res.status(502).json({ error: `Erro ao conectar com o Asaas: ${message}` });
+        return;
       }
     }
 
     // Importante (PRD): checkout NUNCA libera assinatura por si só; apenas grava IDs do Asaas e aguarda webhook
-    db.prepare(`
-      UPDATE subscriptions
-      SET asaas_customer_id = ?, asaas_subscription_id = ?, plan_code = ?, payment_method = ?, monthly_price = ?, updated_at = datetime('now')
-      WHERE company_id = ?
-    `).run(asaasCustomerId, asaasSubscriptionId, planCode, paymentMethod, plan.value, req.companyId!);
+    if (supa.isSupabaseBackendEnabled) {
+      await supa.saveSubscriptionCheckout(req.companyId!, req.userId!, {
+        asaasCustomerId,
+        asaasSubscriptionId,
+        planCode,
+        paymentMethod,
+        monthlyPrice: plan.value,
+        mode: checkoutMode,
+      });
+    } else {
+      db.prepare(`
+        UPDATE subscriptions
+        SET asaas_customer_id = ?, asaas_subscription_id = ?, plan_code = ?, payment_method = ?, monthly_price = ?, updated_at = datetime('now')
+        WHERE company_id = ?
+      `).run(asaasCustomerId, asaasSubscriptionId, planCode, paymentMethod, plan.value, req.companyId!);
 
-    writeAuditLog(req.companyId!, req.userId!, 'subscription_checkout_created', 'subscriptions', req.companyId!, null, {
-      plan_code: planCode,
-      payment_method: paymentMethod,
-      asaas_subscription_id: asaasSubscriptionId,
-    });
+      writeAuditLog(req.companyId!, req.userId!, 'subscription_checkout_created', 'subscriptions', req.companyId!, null, {
+        plan_code: planCode,
+        payment_method: paymentMethod,
+        asaas_subscription_id: asaasSubscriptionId,
+        mode: checkoutMode,
+      });
+    }
 
     res.json({
       asaas_customer_id: asaasCustomerId,
       asaas_subscription_id: asaasSubscriptionId,
       invoice_url: invoiceUrl,
+      mode: checkoutMode,
       status: 'pending_webhook_confirmation',
-      message: 'Assinatura criada no Asaas. A liberação ocorre automaticamente assim que o webhook confirmar o pagamento.',
+      message:
+        checkoutMode === 'asaas_api'
+          ? 'Assinatura criada no Asaas. Conclua o pagamento no link gerado para liberar o acesso via webhook.'
+          : 'Assinatura gerada em modo Sandbox Simulado. Use o simulador de webhook abaixo para testar a confirmação.',
     });
   });
 
   app.post('/api/subscription/cancel', requireAuth, requireCompany(true), async (req: AuthedRequest, res) => {
-    const sub = db.prepare('SELECT * FROM subscriptions WHERE company_id = ?').get(req.companyId!) as any;
+    const sub = supa.isSupabaseBackendEnabled
+      ? await supa.getSubscriptionByCompany(req.companyId!)
+      : (db.prepare('SELECT * FROM subscriptions WHERE company_id = ?').get(req.companyId!) as any);
+
     if (!sub) {
       res.status(404).json({ error: 'Assinatura não encontrada.' });
       return;
@@ -1087,27 +1779,31 @@ async function startServer() {
     }
 
     const periodEnd = sub.current_period_end || new Date(Date.now() + 7 * 86400_000).toISOString();
-    db.prepare(`
-      UPDATE subscriptions
-      SET status = 'canceled', canceled_at = datetime('now'), current_period_end = ?, updated_at = datetime('now')
-      WHERE company_id = ?
-    `).run(periodEnd, req.companyId!);
+    if (supa.isSupabaseBackendEnabled) {
+      await supa.markSubscriptionCanceled(req.companyId!, req.userId!, sub, periodEnd);
+    } else {
+      db.prepare(`
+        UPDATE subscriptions
+        SET status = 'canceled', canceled_at = datetime('now'), current_period_end = ?, updated_at = datetime('now')
+        WHERE company_id = ?
+      `).run(periodEnd, req.companyId!);
 
-    writeAuditLog(
-      req.companyId!,
-      req.userId!,
-      'subscription_canceled',
-      'subscriptions',
-      sub.id,
-      { status: sub.status },
-      { status: 'canceled', current_period_end: periodEnd }
-    );
+      writeAuditLog(
+        req.companyId!,
+        req.userId!,
+        'subscription_canceled',
+        'subscriptions',
+        sub.id,
+        { status: sub.status },
+        { status: 'canceled', current_period_end: periodEnd }
+      );
+    }
 
     res.json({ ok: true, message: 'Assinatura cancelada. Acesso mantido até o fim do período vigente.' });
   });
 
   function processAsaasWebhookPayload(payload: any, tokenHeader: string | undefined) {
-    if (!tokenHeader || tokenHeader !== ASAAS_WEBHOOK_TOKEN) {
+    if (!ASAAS_WEBHOOK_TOKEN || !tokenHeader || tokenHeader !== ASAAS_WEBHOOK_TOKEN) {
       return { status: 401, body: { error: 'Token de webhook inválido.' } };
     }
     const eventId = String(payload?.id || '');
@@ -1189,13 +1885,49 @@ async function startServer() {
     }
   }
 
-  app.post('/api/webhooks/asaas', (req, res) => {
+  app.post('/api/webhooks/asaas', async (req, res) => {
     const token = req.header('asaas-access-token');
-    const result = processAsaasWebhookPayload(req.body, token);
+    if (!ASAAS_WEBHOOK_TOKEN) {
+      res.status(401).json({ error: 'Token de webhook não configurado.' });
+      return;
+    }
+    const result = supa.isSupabaseBackendEnabled
+      ? await supa.processAsaasWebhook(req.body, token, ASAAS_WEBHOOK_TOKEN)
+      : processAsaasWebhookPayload(req.body, token);
     res.status(result.status).json(result.body);
   });
 
-  app.post('/api/subscription/sandbox-simulate', requireAuth, requireCompany(true), (req: AuthedRequest, res) => {
+  app.post('/api/subscription/sandbox-simulate', requireAuth, requireCompany(true), async (req: AuthedRequest, res) => {
+    if (process.env.NODE_ENV === 'production') {
+      res.status(403).json({ error: 'Simulador desabilitado em produção.' });
+      return;
+    }
+    if (supa.isSupabaseBackendEnabled) {
+      const sub = await supa.getSubscriptionByCompany(req.companyId!);
+      if (!sub) {
+        res.status(404).json({ error: 'Assinatura não encontrada.' });
+        return;
+      }
+      let asaasSubId = sub.asaas_subscription_id;
+      if (!asaasSubId) {
+        asaasSubId = `sub_sbx_${crypto.randomBytes(6).toString('hex')}`;
+        await supa.setSandboxAsaasSubscriptionId(sub.id, asaasSubId);
+      }
+      const eventType = String(req.body?.event || 'PAYMENT_CONFIRMED');
+      const eventId = String(req.body?.event_id || `evt_${crypto.randomBytes(6).toString('hex')}`);
+      const result = await supa.processAsaasWebhook(
+        {
+          id: eventId,
+          event: eventType,
+          payment: { subscription: asaasSubId },
+        },
+        ASAAS_WEBHOOK_TOKEN,
+        ASAAS_WEBHOOK_TOKEN
+      );
+      res.status(result.status).json({ ...result.body, event_id: eventId });
+      return;
+    }
+
     const sub = db.prepare('SELECT * FROM subscriptions WHERE company_id = ?').get(req.companyId!) as any;
     if (!sub) {
       res.status(404).json({ error: 'Assinatura não encontrada.' });
@@ -1225,9 +1957,19 @@ async function startServer() {
   // ===========================================================================
   // PUBLIC VITRINE ROUTES (STRICTLY READ-ONLY FROM public_vehicles_view)
   // ===========================================================================
-  app.get('/api/public/garages/:slug', rateLimitPublic(120), (req, res) => {
+  app.get('/api/public/garages/:slug', rateLimitPublic(120), async (req, res) => {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const minYear = Number(req.query.minYear || 0);
+    const maxPrice = Number(req.query.maxPrice || 0);
+
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.getPublicGarage(req.params.slug, { q, minYear, maxPrice });
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const company = db
-      .prepare('SELECT id, name, slug, whatsapp, instagram, address, logo_url, cover_url, show_sold, trial_ends_at FROM companies WHERE slug = ?')
+      .prepare('SELECT id, name, slug, whatsapp, instagram, address, opening_hours, logo_url, cover_url, show_sold, trial_ends_at FROM companies WHERE slug = ?')
       .get(req.params.slug) as any;
 
     if (!company) {
@@ -1241,10 +1983,6 @@ async function startServer() {
       res.status(403).json({ error: 'Esta vitrine está temporariamente fora do ar.' });
       return;
     }
-
-    const q = String(req.query.q || '').trim().toLowerCase();
-    const minYear = Number(req.query.minYear || 0);
-    const maxPrice = Number(req.query.maxPrice || 0);
 
     let vehicles = db
       .prepare('SELECT * FROM public_vehicles_view WHERE company_id = ? ORDER BY created_at DESC')
@@ -1275,6 +2013,7 @@ async function startServer() {
         whatsapp: company.whatsapp,
         instagram: company.instagram,
         address: company.address,
+        opening_hours: company.opening_hours || '',
         logo_url: company.logo_url,
         cover_url: company.cover_url,
         show_sold: Boolean(company.show_sold),
@@ -1283,9 +2022,15 @@ async function startServer() {
     });
   });
 
-  app.get('/api/public/garages/:slug/vehicles/:carSlug', rateLimitPublic(120), (req, res) => {
+  app.get('/api/public/garages/:slug/vehicles/:carSlug', rateLimitPublic(120), async (req, res) => {
+    if (supa.isSupabaseBackendEnabled) {
+      const result = await supa.getPublicVehicle(req.params.slug, req.params.carSlug);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
     const company = db
-      .prepare('SELECT id, name, slug, whatsapp, instagram, address, logo_url, cover_url, show_sold, trial_ends_at FROM companies WHERE slug = ?')
+      .prepare('SELECT id, name, slug, whatsapp, instagram, address, opening_hours, logo_url, cover_url, show_sold, trial_ends_at FROM companies WHERE slug = ?')
       .get(req.params.slug) as any;
     if (!company) {
       res.status(404).json({ error: 'Garagem não encontrada.' });
@@ -1320,6 +2065,7 @@ async function startServer() {
         whatsapp: company.whatsapp,
         instagram: company.instagram,
         address: company.address,
+        opening_hours: company.opening_hours || '',
         logo_url: company.logo_url,
         cover_url: company.cover_url,
         show_sold: Boolean(company.show_sold),
@@ -1328,10 +2074,16 @@ async function startServer() {
     });
   });
 
-  app.post('/api/public/garages/:slug/vehicles/:carSlug/track', rateLimitPublic(60), (req, res) => {
+  app.post('/api/public/garages/:slug/vehicles/:carSlug/track', rateLimitPublic(60), async (req, res) => {
     const type = String(req.body?.type || '');
     if (!['view', 'whatsapp_click'].includes(type)) {
       res.status(400).json({ error: 'Tipo de evento inválido.' });
+      return;
+    }
+
+    if (supa.isSupabaseBackendEnabled) {
+      await supa.trackPublicEvent(req.params.slug, req.params.carSlug, type);
+      res.json({ ok: true });
       return;
     }
 
@@ -1366,10 +2118,11 @@ async function startServer() {
   // VITE / STATIC SERVING + DYNAMIC OPENGRAPH PREVIEW FOR WHATSAPP & INSTAGRAM
   // ===========================================================================
   const isProd = process.env.NODE_ENV === 'production';
-  let vite: Awaited<ReturnType<typeof createViteServer>> | null = null;
+  let vite: any = null;
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: 'spa',
     });
   }
@@ -1385,34 +2138,49 @@ async function startServer() {
       const vitrineMatch = req.path.match(/^\/g\/([a-z0-9-]+)(?:\/([a-z0-9-]+))?\/?$/);
       if (vitrineMatch) {
         const [, garageSlug, carSlug] = vitrineMatch;
-        const company = db
-          .prepare('SELECT id, name, address, cover_url FROM companies WHERE slug = ?')
-          .get(garageSlug) as any;
+        let ogTitle = '';
+        let ogDesc = '';
+        let ogImage = '';
 
-        if (company) {
-          let ogTitle = `${company.name} — Vitrine de Veículos`;
-          let ogDesc = company.address || `Confira o estoque disponível na ${company.name}.`;
-          let ogImage = company.cover_url || '';
+        if (supa.isSupabaseBackendEnabled) {
+          const meta = await supa.getPublicOgMeta(garageSlug, carSlug);
+          if (meta) {
+            ogTitle = meta.ogTitle;
+            ogDesc = meta.ogDesc;
+            ogImage = meta.ogImage;
+          }
+        } else {
+          const company = db
+            .prepare('SELECT id, name, address, cover_url FROM companies WHERE slug = ?')
+            .get(garageSlug) as any;
 
-          if (carSlug) {
-            const vehicle = db
-              .prepare('SELECT id, brand, model, version, model_year, announced_price, mileage FROM public_vehicles_view WHERE company_id = ? AND slug = ?')
-              .get(company.id, carSlug) as any;
-            if (vehicle) {
-              const priceStr = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(
-                vehicle.announced_price
-              );
-              ogTitle = `${vehicle.brand} ${vehicle.model} ${vehicle.model_year} — ${priceStr}`;
-              ogDesc = `${vehicle.version || ''} · ${new Intl.NumberFormat('pt-BR').format(vehicle.mileage)} km · ${company.name}`.trim();
-              const photo = db
-                .prepare('SELECT storage_path FROM vehicle_photos WHERE vehicle_id = ? ORDER BY sort_order ASC LIMIT 1')
-                .get(vehicle.id) as any;
-              if (photo?.storage_path && !photo.storage_path.startsWith('data:')) {
-                ogImage = photo.storage_path;
+          if (company) {
+            ogTitle = `${company.name} — Vitrine de Veículos`;
+            ogDesc = company.address || `Confira o estoque disponível na ${company.name}.`;
+            ogImage = company.cover_url || '';
+
+            if (carSlug) {
+              const vehicle = db
+                .prepare('SELECT id, brand, model, version, model_year, announced_price, mileage FROM public_vehicles_view WHERE company_id = ? AND slug = ?')
+                .get(company.id, carSlug) as any;
+              if (vehicle) {
+                const priceStr = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(
+                  vehicle.announced_price
+                );
+                ogTitle = `${vehicle.brand} ${vehicle.model} ${vehicle.model_year} — ${priceStr}`;
+                ogDesc = `${vehicle.version || ''} · ${new Intl.NumberFormat('pt-BR').format(vehicle.mileage)} km · ${company.name}`.trim();
+                const photo = db
+                  .prepare('SELECT storage_path FROM vehicle_photos WHERE vehicle_id = ? ORDER BY sort_order ASC LIMIT 1')
+                  .get(vehicle.id) as any;
+                if (photo?.storage_path && !photo.storage_path.startsWith('data:')) {
+                  ogImage = photo.storage_path;
+                }
               }
             }
           }
+        }
 
+        if (ogTitle) {
           const safe = (s: string) => s.replace(/"/g, '&quot;').replace(/</g, '&lt;');
           html = html
             .replace(/<title>.*?<\/title>/, `<title>${safe(ogTitle)}</title>`)
@@ -1434,18 +2202,32 @@ async function startServer() {
     }
   };
 
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'Endpoint não encontrado.' });
+  });
+
   app.get(['/g/:slug', '/g/:slug/:carSlug'], renderSpaHtml);
 
   if (!isProd && vite) {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(process.cwd(), 'dist')));
+    app.use('/src/assets/images', express.static(path.resolve(process.cwd(), 'src/assets/images')));
   }
 
   app.get('*', renderSpaHtml);
 
+  app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+    console.error('Unhandled server error:', err);
+    if (req.path.startsWith('/api')) {
+      res.status(500).json({ error: 'Erro interno do servidor.' });
+      return;
+    }
+    res.status(500).end('Erro interno ao carregar página.');
+  });
+
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`CS22 Garage running on http://0.0.0.0:${PORT}`);
+    console.log(`CS22 Garage running on http://0.0.0.0:${PORT} (${isProd ? 'production' : 'development'})`);
   });
 }
 
