@@ -45,18 +45,31 @@ serve(async (req) => {
 
   try {
     const asaasSubId = payload.payment?.subscription || payload.subscription?.id;
-    if (!asaasSubId) {
+    const externalRef = payload.payment?.externalReference || payload.subscription?.externalReference;
+    if (!asaasSubId && !externalRef) {
       throw new Error("subscription id missing in webhook payload");
     }
 
-    const { data: sub } = await adminClient
-      .from("subscriptions")
-      .select("*")
-      .eq("asaas_subscription_id", asaasSubId)
-      .single();
+    let sub: any = null;
+    if (asaasSubId) {
+      const { data } = await adminClient
+        .from("subscriptions")
+        .select("*")
+        .eq("asaas_subscription_id", asaasSubId)
+        .maybeSingle();
+      sub = data;
+    }
+    if (!sub && externalRef) {
+      const { data } = await adminClient
+        .from("subscriptions")
+        .select("*")
+        .eq("company_id", externalRef)
+        .maybeSingle();
+      sub = data;
+    }
 
     if (!sub) {
-      throw new Error(`subscription ${asaasSubId} not found`);
+      throw new Error(`subscription ${asaasSubId || externalRef} not found`);
     }
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };

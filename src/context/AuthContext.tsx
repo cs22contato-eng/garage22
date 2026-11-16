@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { apiRequest, getAuthToken, setAuthToken } from '../lib/api';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
 import type { Company, Subscription, UserProfile } from '../types/garage';
 
 interface AuthState {
@@ -21,6 +22,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const refreshSession = useCallback(async () => {
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data: sessData } = await supabase.auth.getSession();
+        if (!sessData.session) {
+          setAuthToken(null);
+          setUser(null);
+          setCompany(null);
+          setSubscription(null);
+          setLoading(false);
+          return;
+        }
+        setAuthToken(sessData.session.access_token);
+        const data = await apiRequest<{
+          user: UserProfile;
+          company: Company | null;
+          subscription: Subscription | null;
+        }>('/api/auth/me');
+        setUser(data.user);
+        setCompany(data.company);
+        setSubscription(data.subscription);
+      } catch {
+        setAuthToken(null);
+        setUser(null);
+        setCompany(null);
+        setSubscription(null);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     const token = getAuthToken();
     if (!token) {
       setUser(null);
@@ -50,6 +82,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     refreshSession();
+    if (!isSupabaseConfigured || !supabase) return;
+    const {
+      data: { subscription: authSub },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        setAuthToken(null);
+        setUser(null);
+        setCompany(null);
+        setSubscription(null);
+        setLoading(false);
+      } else if (
+        event === 'TOKEN_REFRESHED' ||
+        event === 'PASSWORD_RECOVERY' ||
+        (event === 'SIGNED_IN' && session?.access_token && session.access_token !== getAuthToken())
+      ) {
+        void refreshSession();
+      }
+    });
+    return () => {
+      authSub.unsubscribe();
+    };
   }, [refreshSession]);
 
   const setSessionToken = useCallback(
@@ -66,6 +119,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     setCompany(null);
     setSubscription(null);
+    if (isSupabaseConfigured && supabase) {
+      void supabase.auth.signOut();
+    }
   }, []);
 
   return (

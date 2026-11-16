@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowLeft, MailCheck } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 
 type AuthMode = 'login' | 'register' | 'confirm' | 'forgot';
@@ -31,14 +32,36 @@ export function AuthPages({ initialMode, navigate }: AuthPagesProps) {
     setError('');
     setInfo('');
 
-    // Suporte ao link de recuperação enviado por e-mail pelo Supabase (#access_token=...&type=recovery)
-    if (initialMode === 'forgot' && window.location.hash) {
-      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-      const accessToken = hashParams.get('access_token');
-      const type = hashParams.get('type');
-      if (accessToken && type === 'recovery') {
-        setRecoveryAccessToken(accessToken);
-        setInfo('Link validado. Defina sua nova senha abaixo.');
+    // Suporte ao link de recuperação enviado por e-mail pelo Supabase (#access_token=...&type=recovery ou PKCE ?code=...)
+    if (initialMode === 'forgot') {
+      if (window.location.hash) {
+        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        const accessToken = hashParams.get('access_token');
+        const type = hashParams.get('type');
+        if (accessToken && type === 'recovery') {
+          setRecoveryAccessToken(accessToken);
+          setInfo('Link validado. Defina sua nova senha abaixo.');
+          return;
+        }
+      }
+      if (isSupabaseConfigured && supabase) {
+        const queryParams = new URLSearchParams(window.location.search);
+        const hasCode = queryParams.has('code');
+        supabase.auth.getSession().then(({ data }) => {
+          if (data.session?.access_token && hasCode) {
+            setRecoveryAccessToken(data.session.access_token);
+            setInfo('Link validado. Defina sua nova senha abaixo.');
+          }
+        });
+        const {
+          data: { subscription },
+        } = supabase.auth.onAuthStateChange((event, session) => {
+          if ((event === 'PASSWORD_RECOVERY' || (event === 'SIGNED_IN' && hasCode)) && session?.access_token) {
+            setRecoveryAccessToken(session.access_token);
+            setInfo('Link validado. Defina sua nova senha abaixo.');
+          }
+        });
+        return () => subscription.unsubscribe();
       }
     }
   }, [initialMode]);
@@ -337,9 +360,11 @@ export function AuthPages({ initialMode, navigate }: AuthPagesProps) {
 
             {mode === 'confirm' && (
               <form onSubmit={handleConfirmEmail} className="space-y-4">
-                <div className="flex items-center gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600">
-                  <MailCheck className="w-4 h-4 text-brand-blue shrink-0" />
-                  <span>Confirme o e-mail <strong>{email}</strong> para liberar seu acesso.</span>
+                <div className="flex items-start gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600">
+                  <MailCheck className="w-4 h-4 text-brand-blue shrink-0 mt-0.5" />
+                  <span>
+                    Enviamos a confirmação para <strong>{email}</strong>. Clique no link recebido por e-mail ou digite o código abaixo.
+                  </span>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">Código de confirmação</label>

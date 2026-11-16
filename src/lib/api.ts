@@ -1,3 +1,9 @@
+import { ApiError } from './apiError';
+import { isSupabaseConfigured } from './supabase';
+import { handleSupabaseDirectRequest } from './supabaseDirect';
+
+export { ApiError };
+
 const TOKEN_KEY = 'cs22_garage_token';
 
 export function getAuthToken(): string | null {
@@ -12,20 +18,11 @@ export function setAuthToken(token: string | null) {
   }
 }
 
-export class ApiError extends Error {
-  status: number;
-  code?: string;
-  data?: any;
-
-  constructor(message: string, status: number, code?: string, data?: any) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.data = data;
-  }
-}
-
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+  if (isSupabaseConfigured) {
+    return handleSupabaseDirectRequest<T>(path, options);
+  }
+
   const token = getAuthToken();
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string> | undefined),
@@ -47,8 +44,12 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
 
   if (!res.ok) {
+    const fallbackMessage =
+      res.status === 405
+        ? 'Configuração do Supabase ausente no build (VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY). Adicione as variáveis no Cloudflare Pages e refaça o deploy.'
+        : `Erro na requisição (${res.status})`;
     throw new ApiError(
-      json?.error || `Erro na requisição (${res.status})`,
+      json?.error || fallbackMessage,
       res.status,
       json?.code,
       json

@@ -6,11 +6,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const ASAAS_API_KEY = Deno.env.get("ASAAS_API_KEY")!;
-const ASAAS_BASE_URL =
-  Deno.env.get("ASAAS_ENV") === "production"
-    ? "https://api.asaas.com/v3"
-    : "https://sandbox.asaas.com/api/v3";
+const ASAAS_API_KEY = (Deno.env.get("ASAAS_API_KEY") || "").trim();
+const IS_PROD_ASAAS =
+  ASAAS_API_KEY.startsWith("$aact_prod_") ||
+  (!ASAAS_API_KEY.startsWith("$aact_hmlg_") && Deno.env.get("ASAAS_ENV") === "production");
+const ASAAS_BASE_URL = IS_PROD_ASAAS
+  ? "https://api.asaas.com/v3"
+  : "https://sandbox.asaas.com/api/v3";
 
 const SINGLE_PLAN = {
   code: "mensal_5990",
@@ -54,15 +56,11 @@ serve(async (req) => {
     return jsonResponse({ error: "Invalid session" }, 401);
   }
 
-  const { company_id, payment_method, customer_name, customer_cpf_cnpj } = await req.json();
-  const plan_code = SINGLE_PLAN.code;
-  const plan = SINGLE_PLAN;
-  const cleanCpfCnpj = String(customer_cpf_cnpj || "").replace(/\D/g, "");
-  if (!["PIX", "BOLETO", "CREDIT_CARD"].includes(payment_method)) {
-    return jsonResponse({ error: "Forma de pagamento inválida" }, 400);
-  }
-  if (cleanCpfCnpj.length !== 11 && cleanCpfCnpj.length !== 14) {
-    return jsonResponse({ error: "Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido." }, 400);
+  const body = await req.json();
+  const action = String(body?.action || "create");
+  const company_id = String(body?.company_id || "");
+  if (!company_id) {
+    return jsonResponse({ error: "Garagem não informada" }, 400);
   }
 
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -77,6 +75,73 @@ serve(async (req) => {
 
   if (!member) {
     return jsonResponse({ error: "Acesso negado à garagem" }, 403);
+  }
+
+  if (action === "cancel") {
+    const { data: sub } = await adminClient
+      .from("subscriptions")
+      .select("*")
+      .eq("company_id", company_id)
+      .maybeSingle();
+
+    if (!sub) {
+      return jsonResponse({ error: "Assinatura não encontrada" }, 404);
+    }
+
+    if (
+      ASAAS_API_KEY &&
+      sub.asaas_subscription_id &&
+      !String(sub.asaas_subscription_id).startsWith("sub_sbx_")
+    ) {
+      try {
+        await fetch(`${ASAAS_BASE_URL}/subscriptions/${sub.asaas_subscription_id}`, {
+          method: "DELETE",
+          headers: { access_token: ASAAS_API_KEY },
+        });
+      } catch {
+        // segue cancelamento local
+      }
+    }
+
+    const periodEnd = sub.current_period_end || new Date().toISOString();
+    await adminClient
+      .from("subscriptions")
+      .update({
+        status: "canceled",
+        canceled_at: new Date().toISOString(),
+        current_period_end: periodEnd,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("company_id", company_id);
+
+    await adminClient.from("audit_logs").insert({
+      company_id,
+      user_id: userData.user.id,
+      action: "subscription_canceled",
+      table_name: "subscriptions",
+      record_id: sub.id,
+      before_data: { status: sub.status },
+      after_data: { status: "canceled", current_period_end: periodEnd },
+    });
+
+    return jsonResponse({
+      ok: true,
+      message: "Assinatura cancelada. Seu acesso permanece ativo até o fim do período já pago.",
+    });
+  }
+
+  const { payment_method, customer_name, customer_cpf_cnpj } = body;
+  const plan_code = SINGLE_PLAN.code;
+  const plan = SINGLE_PLAN;
+  const cleanCpfCnpj = String(customer_cpf_cnpj || "").replace(/\D/g, "");
+  if (!["PIX", "BOLETO", "CREDIT_CARD"].includes(payment_method)) {
+    return jsonResponse({ error: "Forma de pagamento inválida" }, 400);
+  }
+  if (cleanCpfCnpj.length !== 11 && cleanCpfCnpj.length !== 14) {
+    return jsonResponse({ error: "Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido." }, 400);
+  }
+  if (!ASAAS_API_KEY) {
+    return jsonResponse({ error: "Chave ASAAS_API_KEY não configurada na Edge Function." }, 500);
   }
 
   const { data: existingSub } = await adminClient
@@ -108,7 +173,7 @@ serve(async (req) => {
     asaasCustomerId = customer.id;
   }
 
-  // Criar assinatura mensal/anual no Asaas (liberação apenas via webhook confirmado)
+  // Criar assinatura mensal no Asaas (liberação apenas via webhook confirmado)
   const nextDueDate = new Date().toISOString().slice(0, 10);
   const subRes = await fetch(`${ASAAS_BASE_URL}/subscriptions`, {
     method: "POST",
@@ -167,6 +232,7 @@ serve(async (req) => {
     asaas_subscription_id: asaasSub.id,
     asaas_customer_id: asaasCustomerId,
     invoice_url: invoiceUrl,
+    message: "Cobrança criada no Asaas. A assinatura será ativada assim que o pagamento for confirmado pelo webhook.",
     status: "pending_webhook_confirmation",
   });
 });

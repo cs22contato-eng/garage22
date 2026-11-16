@@ -46,11 +46,10 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
         document.title = title;
 
         // Registrar visualização diária do veículo
-        fetch(
+        apiRequest(
           `/api/public/garages/${encodeURIComponent(garageSlug)}/vehicles/${encodeURIComponent(carSlug)}/track`,
           {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type: 'view' }),
           }
         ).catch(() => {});
@@ -69,11 +68,10 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
 
   const handleWhatsAppClick = () => {
     if (!company || !vehicle) return;
-    fetch(
+    apiRequest(
       `/api/public/garages/${encodeURIComponent(garageSlug)}/vehicles/${encodeURIComponent(carSlug)}/track`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'whatsapp_click' }),
       }
     ).catch(() => {});
