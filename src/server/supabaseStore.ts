@@ -73,7 +73,31 @@ export function getSupabaseAuth(): SupabaseClient {
   return authClient;
 }
 
-const RESERVED_SLUGS = new Set(['admin', 'api', 'g', 'app', 'login', 'entrar', 'planos', 'cadastro', 'onboarding']);
+const RESERVED_SLUGS = new Set([
+  'admin',
+  'api',
+  'app',
+  'assets',
+  'g',
+  'login',
+  'entrar',
+  'planos',
+  'cadastro',
+  'onboarding',
+  'recuperar-senha',
+  'manifest',
+  'sw',
+  'offline',
+  'favicon',
+  'icon',
+  'robots',
+  'sitemap',
+  'health',
+  'webhooks',
+  'suporte',
+  'termos',
+  'privacidade',
+]);
 const VALID_STATUSES = new Set(['preparacao', 'disponivel', 'reservado', 'vendido', 'inativo']);
 const VALID_CATEGORIES = new Set([
   'documentacao',

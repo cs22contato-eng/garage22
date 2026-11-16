@@ -262,13 +262,27 @@ export const EXPENSE_CATEGORY_LABELS: Record<ExpenseCategory, string> = {
 export const RESERVED_GARAGE_SLUGS = [
   'admin',
   'api',
-  'g',
   'app',
+  'assets',
+  'g',
   'login',
   'entrar',
   'planos',
   'cadastro',
   'onboarding',
+  'recuperar-senha',
+  'manifest',
+  'sw',
+  'offline',
+  'favicon',
+  'icon',
+  'robots',
+  'sitemap',
+  'health',
+  'webhooks',
+  'suporte',
+  'termos',
+  'privacidade',
 ];
 
 export const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {
@@ -332,4 +346,21 @@ export function buildWhatsAppUrl(rawPhone: string | null | undefined, text?: str
       : digits;
   const query = text ? `?text=${encodeURIComponent(text)}` : '';
   return `https://wa.me/${normalized}${query}`;
+}
+
+export const PUBLIC_VITRINE_DOMAIN = 'garage.cs22.com.br';
+
+export function buildVitrinePath(garageSlug: string, carSlug?: string): string {
+  const cleanGarage = String(garageSlug || '').replace(/^\/+|\/+$/g, '');
+  if (!carSlug) return `/${cleanGarage}`;
+  const cleanCar = String(carSlug).replace(/^\/+|\/+$/g, '');
+  return `/${cleanGarage}/${cleanCar}`;
+}
+
+export function buildVitrinePublicUrl(garageSlug: string, carSlug?: string): string {
+  return `https://${PUBLIC_VITRINE_DOMAIN}${buildVitrinePath(garageSlug, carSlug)}`;
+}
+
+export function formatVitrineDisplayUrl(garageSlug: string, carSlug?: string): string {
+  return `${PUBLIC_VITRINE_DOMAIN}${buildVitrinePath(garageSlug, carSlug)}`;
 }

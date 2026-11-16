@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Share2, MessageCircle, Check, MapPin } from 'lucide-react';
 import { apiRequest } from '../lib/api';
-import { buildWhatsAppUrl, formatBRL, formatKm, type PublicCompany, type PublicVehicle } from '../types/garage';
+import {
+  buildVitrinePath,
+  buildVitrinePublicUrl,
+  buildWhatsAppUrl,
+  formatBRL,
+  formatKm,
+  type PublicCompany,
+  type PublicVehicle,
+} from '../types/garage';
 import { VehicleImage } from '../components/VehicleImage';
 
 interface PublicVehiclePageProps {
@@ -70,7 +78,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
       }
     ).catch(() => {});
 
-    const link = window.location.href;
+    const link = buildVitrinePublicUrl(garageSlug, carSlug);
     const msg = `Olá, ${company.name}! Tenho interesse no ${vehicle.brand} ${vehicle.model} ${vehicle.version} (${vehicle.manufacture_year}/${vehicle.model_year}) anunciado por ${formatBRL(
       vehicle.announced_price
     )}. Link: ${link}`;
@@ -82,7 +90,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
 
   const handleShare = async () => {
     if (!vehicle) return;
-    const url = window.location.href;
+    const url = buildVitrinePublicUrl(garageSlug, carSlug);
     const title = `${vehicle.brand} ${vehicle.model} ${vehicle.model_year}`;
     if (navigator.share) {
       try {
@@ -124,7 +132,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
           <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-2.5">
             <button
               type="button"
-              onClick={() => navigate(`/g/${garageSlug}`)}
+              onClick={() => navigate(buildVitrinePath(garageSlug))}
               className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 bg-brand-blue hover:bg-brand-blue-hover text-white text-sm font-semibold rounded-xl"
             >
               Voltar para a vitrine
@@ -152,7 +160,7 @@ export function PublicVehiclePage({ garageSlug, carSlug, navigate }: PublicVehic
       <header className="sticky top-0 z-20 bg-brand-dark text-white border-b border-slate-800 h-14 px-4 sm:px-6 flex items-center justify-between gap-4">
         <button
           type="button"
-          onClick={() => navigate(`/g/${garageSlug}`)}
+          onClick={() => navigate(buildVitrinePath(garageSlug))}
           className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-white truncate"
         >
           <ArrowLeft className="w-4 h-4 shrink-0" />

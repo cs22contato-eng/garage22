@@ -49,7 +49,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
             </a>
             <button
               type="button"
-              onClick={() => navigate('/g/premium-motors')}
+              onClick={() => navigate('/premium-motors')}
               className="hover:text-white transition-colors whitespace-nowrap shrink-0"
             >
               Vitrine exemplo
@@ -80,7 +80,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-stretch">
           <div className="lg:col-span-6 flex flex-col justify-center">
             <p className="text-xs font-semibold text-brand-blue mb-3">
-              Gestão enxuta para garagens e revendas independentes
+              Plataforma comercial para garagens e revendas de veículos
             </p>
             <h1 className="font-display text-3xl sm:text-4xl lg:text-[2.75rem] font-extrabold tracking-tight text-slate-900 leading-[1.12] [text-wrap:balance]">
               Uma vitrine no link da bio e o lucro real de cada carro vendido.
@@ -101,7 +101,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
               </button>
               <button
                 type="button"
-                onClick={() => navigate('/g/premium-motors')}
+                onClick={() => navigate('/premium-motors')}
                 className="min-h-[48px] px-5 py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 text-sm font-semibold rounded-xl transition-colors text-center whitespace-nowrap"
               >
                 Ver vitrine de exemplo
@@ -113,7 +113,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
               <span aria-hidden="true">·</span>
               <span>Funciona no celular</span>
               <span aria-hidden="true">·</span>
-              <span>Vitrine /g/sua-garagem</span>
+              <span>Vitrine garage.cs22.com.br/sua-garagem</span>
             </div>
           </div>
 
@@ -149,7 +149,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
               },
               {
                 num: '02. Publique na bio',
-                desc: 'Seu link /g/sua-garagem já nasce com busca, filtro de ano e preço, pré-visualização no WhatsApp e botão direto.',
+                desc: 'Seu link garage.cs22.com.br/sua-garagem já nasce com busca, filtro de ano e preço, pré-visualização no WhatsApp e botão direto.',
               },
               {
                 num: '03. Lance despesas e alertas',
@@ -286,7 +286,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
               <ul className="mt-6 space-y-2.5 text-sm text-slate-600 flex-1">
                 <li className="flex items-center gap-2">
                   <Check className="w-4 h-4 text-brand-green shrink-0" />
-                  <span>Vitrine pública /g/sua-garagem pronta para a bio</span>
+                  <span>Vitrine pública garage.cs22.com.br/sua-garagem pronta para a bio</span>
                 </li>
                 <li className="flex items-center gap-2">
                   <Check className="w-4 h-4 text-brand-green shrink-0" />
@@ -331,7 +331,7 @@ export function LandingPage({ navigate }: LandingPageProps) {
             <button type="button" onClick={() => navigate('/cadastro')} className="hover:text-white transition-colors">
               Criar conta
             </button>
-            <button type="button" onClick={() => navigate('/g/premium-motors')} className="hover:text-white transition-colors">
+            <button type="button" onClick={() => navigate('/premium-motors')} className="hover:text-white transition-colors">
               Vitrine exemplo
             </button>
           </div>

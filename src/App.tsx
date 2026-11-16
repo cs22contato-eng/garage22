@@ -13,6 +13,9 @@ import { SettingsPage } from './pages/SettingsPage';
 import { PublicVitrinePage } from './pages/PublicVitrinePage';
 import { PublicVehiclePage } from './pages/PublicVehiclePage';
 import { PWAStatusBanner } from './components/PWAStatusBanner';
+import { RESERVED_GARAGE_SLUGS } from './types/garage';
+
+const RESERVED_CLIENT_SLUGS = new Set(RESERVED_GARAGE_SLUGS);
 
 function AppRouter() {
   const [rawPath, setRawPath] = useState(() => window.location.pathname || '/');
@@ -33,21 +36,21 @@ function AppRouter() {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  // Public Vitrine Routes: /g/:garageSlug and /g/:garageSlug/:carSlug
-  const publicCarMatch = path.match(/^\/g\/([a-z0-9-]+)\/([a-z0-9-]+)$/);
-  if (publicCarMatch) {
+  // Legacy Public Vitrine Routes: /g/:garageSlug and /g/:garageSlug/:carSlug
+  const legacyCarMatch = path.match(/^\/g\/([a-z0-9-]+)\/([a-z0-9-]+)$/);
+  if (legacyCarMatch) {
     return (
       <PublicVehiclePage
-        garageSlug={publicCarMatch[1]}
-        carSlug={publicCarMatch[2]}
+        garageSlug={legacyCarMatch[1]}
+        carSlug={legacyCarMatch[2]}
         navigate={navigate}
       />
     );
   }
 
-  const publicGarageMatch = path.match(/^\/g\/([a-z0-9-]+)$/);
-  if (publicGarageMatch) {
-    return <PublicVitrinePage garageSlug={publicGarageMatch[1]} navigate={navigate} />;
+  const legacyGarageMatch = path.match(/^\/g\/([a-z0-9-]+)$/);
+  if (legacyGarageMatch) {
+    return <PublicVitrinePage garageSlug={legacyGarageMatch[1]} navigate={navigate} />;
   }
 
   // Commercial Landing Page
@@ -74,6 +77,23 @@ function AppRouter() {
     }
     const mode = path === '/login' ? 'login' : path === '/cadastro' ? 'register' : 'forgot';
     return <AuthPages initialMode={mode} navigate={navigate} />;
+  }
+
+  // Public Vitrine Routes: /:garageSlug and /:garageSlug/:carSlug (e.g. garage.cs22.com.br/NOMEDAGARAGEM)
+  const publicCarMatch = path.match(/^\/([a-z0-9-]+)\/([a-z0-9-]+)$/);
+  if (publicCarMatch && !RESERVED_CLIENT_SLUGS.has(publicCarMatch[1])) {
+    return (
+      <PublicVehiclePage
+        garageSlug={publicCarMatch[1]}
+        carSlug={publicCarMatch[2]}
+        navigate={navigate}
+      />
+    );
+  }
+
+  const publicGarageMatch = path.match(/^\/([a-z0-9-]+)$/);
+  if (publicGarageMatch && !RESERVED_CLIENT_SLUGS.has(publicGarageMatch[1])) {
+    return <PublicVitrinePage garageSlug={publicGarageMatch[1]} navigate={navigate} />;
   }
 
   // Protected App Routes

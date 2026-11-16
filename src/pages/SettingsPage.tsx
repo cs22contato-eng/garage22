@@ -3,7 +3,12 @@ import { Upload, ExternalLink, Copy, Check, Share2, CheckCircle2, XCircle } from
 import { apiRequest } from '../lib/api';
 import { compressVehicleImage } from '../lib/imageCompression';
 import { useAuth } from '../context/AuthContext';
-import { RESERVED_GARAGE_SLUGS } from '../types/garage';
+import {
+  buildVitrinePath,
+  buildVitrinePublicUrl,
+  formatVitrineDisplayUrl,
+  RESERVED_GARAGE_SLUGS,
+} from '../types/garage';
 import { PWAInstallPrompt } from '../components/PWAInstallPrompt';
 
 interface SettingsPageProps {
@@ -74,7 +79,8 @@ export function SettingsPage({ navigate }: SettingsPageProps) {
     return () => clearTimeout(timer);
   }, [slug, company]);
 
-  const vitrineUrl = company ? `${window.location.origin}/g/${company.slug}` : '';
+  const vitrineUrl = company ? buildVitrinePublicUrl(company.slug) : '';
+  const vitrineDisplayUrl = company ? formatVitrineDisplayUrl(company.slug) : '';
 
   const handleCopyVitrine = async () => {
     if (!vitrineUrl) return;
@@ -155,7 +161,7 @@ export function SettingsPage({ navigate }: SettingsPageProps) {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-xs font-medium text-slate-500">Endereço da sua vitrine pública</p>
-              <p className="mt-1 font-mono text-sm font-semibold text-slate-900 truncate">{vitrineUrl}</p>
+              <p className="mt-1 font-mono text-sm font-semibold text-slate-900 truncate">{vitrineDisplayUrl}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2 shrink-0">
               <button
@@ -176,7 +182,7 @@ export function SettingsPage({ navigate }: SettingsPageProps) {
               </button>
               <button
                 type="button"
-                onClick={() => navigate(`/g/${company.slug}`)}
+                onClick={() => navigate(buildVitrinePath(company.slug))}
                 className="min-h-[40px] px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 transition-colors"
               >
                 <span>Abrir</span>
@@ -260,14 +266,17 @@ export function SettingsPage({ navigate }: SettingsPageProps) {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">Slug da vitrine (/g/...)</label>
+            <label className="block text-xs font-medium text-slate-700 mb-1">Endereço da vitrine</label>
             <div className="flex items-center border border-slate-300 rounded-xl overflow-hidden focus-within:ring-2 focus-within:ring-brand-blue">
+              <span className="px-2.5 h-11 flex items-center bg-slate-100 text-[11px] font-mono text-slate-600 border-r border-slate-300 shrink-0">
+                garage.cs22.com.br/
+              </span>
               <input
                 type="text"
                 required
                 value={slug}
                 onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-                className="flex-1 h-11 px-3 text-sm font-mono focus:outline-none"
+                className="flex-1 min-w-0 h-11 px-3 text-sm font-mono focus:outline-none"
               />
               {slugAvailable === true && (
                 <span className="pr-3 text-emerald-700 flex items-center gap-1 text-xs font-medium shrink-0">

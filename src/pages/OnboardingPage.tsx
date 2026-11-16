@@ -183,8 +183,8 @@ export function OnboardingPage({ navigate }: OnboardingPageProps) {
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1.5">Endereço do link (vitrine pública)</label>
                 <div className="flex items-center border border-slate-300 rounded-xl overflow-hidden focus-within:ring-2 focus-within:ring-brand-blue">
-                  <span className="px-3 h-11 flex items-center bg-slate-100 text-xs font-mono text-slate-600 border-r border-slate-300">
-                    /g/
+                  <span className="px-3 h-11 flex items-center bg-slate-100 text-xs font-mono text-slate-600 border-r border-slate-300 shrink-0">
+                    garage.cs22.com.br/
                   </span>
                   <input
                     type="text"

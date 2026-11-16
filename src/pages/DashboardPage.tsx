@@ -11,8 +11,11 @@ import {
 import { apiRequest } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import {
+  buildVitrinePath,
+  buildVitrinePublicUrl,
   formatBRL,
   formatDateBR,
+  formatVitrineDisplayUrl,
   REMINDER_CATEGORY_LABELS,
   type DashboardMetrics,
 } from '../types/garage';
@@ -48,7 +51,8 @@ export function DashboardPage({ navigate }: DashboardPageProps) {
     };
   }, []);
 
-  const vitrineUrl = company ? `${window.location.origin}/g/${company.slug}` : '';
+  const vitrineUrl = company ? buildVitrinePublicUrl(company.slug) : '';
+  const vitrineDisplayUrl = company ? formatVitrineDisplayUrl(company.slug) : '';
 
   const copyVitrineLink = async () => {
     if (!vitrineUrl) return;
@@ -91,7 +95,7 @@ export function DashboardPage({ navigate }: DashboardPageProps) {
         <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="min-w-0">
             <p className="text-xs font-medium text-slate-500">Link da sua vitrine para Instagram e WhatsApp</p>
-            <p className="mt-1 font-mono text-sm font-medium text-slate-900 truncate">/g/{company.slug}</p>
+            <p className="mt-1 font-mono text-sm font-medium text-slate-900 truncate">{vitrineDisplayUrl}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
@@ -104,7 +108,7 @@ export function DashboardPage({ navigate }: DashboardPageProps) {
             </button>
             <button
               type="button"
-              onClick={() => navigate(`/g/${company.slug}`)}
+              onClick={() => navigate(buildVitrinePath(company.slug))}
               className="min-h-[40px] px-3.5 py-2 bg-brand-dark hover:bg-brand-navy text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
             >
               <span>Abrir vitrine</span>

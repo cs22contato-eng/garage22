@@ -279,7 +279,31 @@ function rateLimitPublic(maxPerMinute: number) {
   };
 }
 
-const RESERVED_SLUGS = new Set(['admin', 'api', 'g', 'app', 'login', 'entrar', 'planos', 'cadastro', 'onboarding']);
+const RESERVED_SLUGS = new Set([
+  'admin',
+  'api',
+  'app',
+  'assets',
+  'g',
+  'login',
+  'entrar',
+  'planos',
+  'cadastro',
+  'onboarding',
+  'recuperar-senha',
+  'manifest',
+  'sw',
+  'offline',
+  'favicon',
+  'icon',
+  'robots',
+  'sitemap',
+  'health',
+  'webhooks',
+  'suporte',
+  'termos',
+  'privacidade',
+]);
 const VALID_STATUSES = new Set(['preparacao', 'disponivel', 'reservado', 'vendido', 'inativo']);
 const VALID_CATEGORIES = new Set([
   'documentacao',
@@ -2134,10 +2158,15 @@ async function startServer() {
         : path.resolve(process.cwd(), 'index.html');
       let html = fs.readFileSync(templatePath, 'utf-8');
 
-      // Inject dynamic OG tags when crawler opens /g/:slug or /g/:slug/:carSlug
-      const vitrineMatch = req.path.match(/^\/g\/([a-z0-9-]+)(?:\/([a-z0-9-]+))?\/?$/);
-      if (vitrineMatch) {
-        const [, garageSlug, carSlug] = vitrineMatch;
+      // Inject dynamic OG tags when crawler opens /:slug or /:slug/:carSlug
+      const segments = req.path.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+      const isRootVitrine =
+        (segments.length === 1 || segments.length === 2) &&
+        !RESERVED_SLUGS.has(segments[0]) &&
+        /^[a-z0-9-]+$/.test(segments[0]) &&
+        (segments.length === 1 || /^[a-z0-9-]+$/.test(segments[1]));
+      if (isRootVitrine) {
+        const [garageSlug, carSlug] = segments;
         let ogTitle = '';
         let ogDesc = '';
         let ogImage = '';
@@ -2184,8 +2213,8 @@ async function startServer() {
           const safe = (s: string) => s.replace(/"/g, '&quot;').replace(/</g, '&lt;');
           html = html
             .replace(/<title>.*?<\/title>/, `<title>${safe(ogTitle)}</title>`)
-            .replace(/<meta property="og:title" content=".*?" \/>/, `<meta property="og:title" content="${safe(ogTitle)}" />`)
-            .replace(/<meta property="og:description" content=".*?" \/>/, `<meta property="og:description" content="${safe(ogDesc)}" />`);
+            .replace(/<meta property="og:title" content="[^"]*"\s*\/?>/, `<meta property="og:title" content="${safe(ogTitle)}" />`)
+            .replace(/<meta property="og:description" content="[^"]*"\s*\/?>/, `<meta property="og:description" content="${safe(ogDesc)}" />`);
           if (ogImage) {
             html = html.replace('</head>', `  <meta property="og:image" content="${safe(ogImage)}" />\n  </head>`);
           }
@@ -2206,7 +2235,33 @@ async function startServer() {
     res.status(404).json({ error: 'Endpoint não encontrado.' });
   });
 
-  app.get(['/g/:slug', '/g/:slug/:carSlug'], renderSpaHtml);
+  app.get('/g/:slug', (req, res) => {
+    res.redirect(301, `/${encodeURIComponent(req.params.slug)}`);
+  });
+
+  app.get('/g/:slug/:carSlug', (req, res) => {
+    res.redirect(301, `/${encodeURIComponent(req.params.slug)}/${encodeURIComponent(req.params.carSlug)}`);
+  });
+
+  app.get('/:slug', (req, res, next) => {
+    if (RESERVED_SLUGS.has(req.params.slug) || !/^[a-z0-9-]+$/.test(req.params.slug)) {
+      next();
+      return;
+    }
+    void renderSpaHtml(req, res);
+  });
+
+  app.get('/:slug/:carSlug', (req, res, next) => {
+    if (
+      RESERVED_SLUGS.has(req.params.slug) ||
+      !/^[a-z0-9-]+$/.test(req.params.slug) ||
+      !/^[a-z0-9-]+$/.test(req.params.carSlug)
+    ) {
+      next();
+      return;
+    }
+    void renderSpaHtml(req, res);
+  });
 
   if (!isProd && vite) {
     app.use(vite.middlewares);

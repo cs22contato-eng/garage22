@@ -12,7 +12,15 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
-import { buildWhatsAppUrl, formatBRL, formatKm, type PublicCompany, type PublicVehicle } from '../types/garage';
+import {
+  buildVitrinePath,
+  buildVitrinePublicUrl,
+  buildWhatsAppUrl,
+  formatBRL,
+  formatKm,
+  type PublicCompany,
+  type PublicVehicle,
+} from '../types/garage';
 import { VehicleImage } from '../components/VehicleImage';
 
 interface PublicVitrinePageProps {
@@ -70,7 +78,7 @@ export function PublicVitrinePage({ garageSlug, navigate }: PublicVitrinePagePro
   }, [garageSlug, q, minYear, maxPrice]);
 
   const handleShareGarage = async () => {
-    const url = window.location.href;
+    const url = buildVitrinePublicUrl(garageSlug);
     if (navigator.share) {
       try {
         await navigator.share({
@@ -305,7 +313,7 @@ export function PublicVitrinePage({ garageSlug, navigate }: PublicVitrinePagePro
                 <button
                   key={car.id}
                   type="button"
-                  onClick={() => navigate(`/g/${garageSlug}/${car.slug}`)}
+                  onClick={() => navigate(buildVitrinePath(garageSlug, car.slug))}
                   className="bg-white border border-slate-200 rounded-2xl overflow-hidden text-left hover:-translate-y-0.5 hover:shadow-md transition-all flex flex-col"
                 >
                   <div className="aspect-[4/3] w-full bg-slate-100 relative overflow-hidden">
